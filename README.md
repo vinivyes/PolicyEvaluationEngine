@@ -1,7 +1,7 @@
 # Azure Policy Evaluation Engine
 This application is intended to make testing Azure Policies faster, with a Policy Assignment ID and Resource ID you can determine if a resource will be flagged as compliant/non-compliant without waiting for Azure's normal evaluation cycle.
 
-##Roadmap
+## Roadmap
 - Replicate ARM Functions behavior
 - Replicate conditions behavior (field, value, count)
 - Retrieve authentication tokens from Azure CLI
@@ -13,5 +13,5 @@ This application is intended to make testing Azure Policies faster, with a Polic
 - Bulk test results agains actual compliance data to raise shortcomings of replication
 - Implement option to evaluate Functions and Conditions using ARM Template outputs for better accuracy and failover.
 
-##Additional Information
+## Additional Information
 This project is still being worked on and the Roadmap reflects the direction I would like to take with this tool as today testing Policies while writting them can take time due to the compliance delays.

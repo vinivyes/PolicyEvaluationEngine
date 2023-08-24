@@ -1,0 +1,15 @@
+{
+  "dependencies": {
+    "axios": "^1.4.0"
+  },
+  "name": "policyevaluationengine",
+  "version": "1.0.0",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "Simulates the process Azure Policy uses to evaluate resources, can be used to test whether policies will flag any resource as compliant or non-compliant without waiting for the compliance data to load."
+}

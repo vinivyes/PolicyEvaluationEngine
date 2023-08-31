@@ -1,14 +1,48 @@
 const crypto = require('crypto');
-const { IsFunction } = require('./parser');
 const { RetrieveAliases, RetrieveAliasesSync } = require('./azureApi');
 const fs = require('fs');
 
+const IsFunction = (f) => {
+      const getFunctionName = (str) => {
+            let segments = str.split("(");
+
+            return str.includes(")") && segments.length > 1 ? segments[0] : null;
+      };
+      let availableFunction = false;
+      let functionName = `${getFunctionName(f)}`.toLocaleLowerCase();
+
+      for (let af of availableFunctions()) {
+            let availableFunctionName = af.toLocaleLowerCase();
+            if (availableFunction)
+                  continue;
+
+            if (availableFunctionName == functionName || availableFunctionName == `${functionName}function`) {
+                  availableFunction = true;
+            }
+      }
+
+      //console.log(`${getFunctionName(f)}`, availableFunction);
+
+      return availableFunction;
+}
+
 const getPropertyFromObject = (obj, properties) => {
       for (let prop of properties) {
-            if (obj && obj.hasOwnProperty(prop)) {
-                  obj = obj[prop];
-            } else {
-                  return undefined;
+            // Check if prop contains an array access pattern, e.g., myProperty[0]
+            const parts = prop.split('[');
+
+            // Loop over each part to handle multiple indices, e.g., myProperty[0][1]
+            for (let part of parts) {
+                  part = part.replace(']', ''); // Remove the closing bracket
+                  if (Number.isInteger(Number(part))) {
+                        // If part is a number, treat it as an array index
+                        obj = obj[Number(part)];
+                  } else if (obj && obj.hasOwnProperty(part)) {
+                        // Otherwise, treat it as an object key
+                        obj = obj[part];
+                  } else {
+                        return undefined;
+                  }
             }
       }
       return obj;
@@ -29,7 +63,7 @@ const ResolveFunctions = (functionTree, context) => {
       }
 
       functionTree.args = argValues;
-
+      //console.log(`Resolving Function:`, functionTree.method);
       const result = typeof operations[functionTree.method] === "function"
             ? operations[functionTree.method](argValues, context)
             : new Error(`Function ${functionTree.method} not found!`);
@@ -379,8 +413,10 @@ const padLeft = (args) => {
 const replace = (args) => {
       if (!Array.isArray(args) || args.length !== 3) {
             throw new Error(`Invalid arguments provided to 'replace' function`);
-      }
-      return args[0].replace(new RegExp(args[1], 'g'), args[2]);
+      }    
+
+      const escapedOldString = args[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return args[0].replace(new RegExp(escapedOldString, 'g'), args[2]);
 }
 
 const skip = (args) => {
@@ -938,10 +974,10 @@ const parameters = (args, context) => {
 }
 
 const inMemory = {
-      aliases:null
+      aliases: null
 }
 
-const field = (args, context) => {
+const field = (args, context, pathOnly = false) => {
       if (!Array.isArray(args)) {
             throw new Error(`Call this function using 'Array' type arguments`);
       }
@@ -954,32 +990,101 @@ const field = (args, context) => {
             throw new Error(`Expected resource in the context for function 'field'`);
       }
 
-      if(!inMemory.aliases){
-            if(fs.existsSync('./aliases.json'))
+      if (!inMemory.aliases) {
+            if (fs.existsSync('./aliases.json'))
                   inMemory.aliases = JSON.parse(fs.readFileSync('./aliases.json', 'utf-8'))
-            else{
+            else {
                   let aliases = RetrieveAliasesSync();
                   inMemory.aliases = aliases;
-                  fs.writeFileSync('./aliases.json', JSON.stringify(aliases), {encoding: 'utf-8'});
+                  fs.writeFileSync('./aliases.json', JSON.stringify(aliases), { encoding: 'utf-8' });
             }
       }
       let path = null;
-      for(let alias of inMemory.aliases){
-            if(alias.name === args[0]){
-                  console.log(alias)
+      for (let alias of inMemory.aliases) {
+            if (alias.name === args[0]) {
+                  //console.log(alias)
                   path = `${alias.defaultPath}`
             }
       }
 
-      if(!path)
+      if (!path)
             throw new Error(`Alias '${args[0]}' was not`);
 
-      return getPropertyFromObject(context.resource,path.split('.'));
+      if (pathOnly)
+            return path;
+
+      if (context.countDepthMap) {
+            path = replaceAsterisksWithNumbers(path, context.countDepthMap)
+      }
+
+      let propertyPaths = path.split('.');
+
+      if (propertyPaths.some((p) => endsWith([p, '[*]']))) {
+            const expandArray = (baseContext, remainingPath, depth = 0) => {
+                  if (depth > 50) {
+                        throw new Error("Exceeded allowed depth of 50");
+                  }
+                  let results = [];
+                  for (let p = 0; p < remainingPath.length; p++) {
+                        let path = remainingPath[p];
+                        if (endsWith([path, '[*]'])) {
+                              let items = getPropertyFromObject(baseContext, [path.substring(0, path.length - 3)]);
+                              //console.log(`Running field function:`,JSON.stringify(baseContext), JSON.stringify(items));
+                              for (let item of items) {
+                                    results.push(expandArray(item, remainingPath.slice(p + 1, remainingPath.length), ++depth))
+                              }
+                        }
+                        else {
+                              baseContext = getPropertyFromObject(baseContext, [path]);
+                        }
+                  }
+
+                  return results.length == 0 ? baseContext : results;
+            }
+            let currentValue = expandArray(context.resource, propertyPaths);
+
+            return currentValue;
+      }
+      else {
+            return getPropertyFromObject(context.resource, propertyPaths);
+      }
+}
+
+function current(args, context) {
+      if (!Array.isArray(args)) {
+            throw new Error(`Call this function using 'Array' type arguments`);
+      }
+
+      if (args.length > 1) {
+            throw new Error(`Expected a maximum of 1 arguments for function 'current', got ${args.length}`);
+      }
+
+      if (!context.countContext) {
+            throw new Error(`Expected current to be used within a 'count'`);
+      }
+
+      if (args.length == 1) {
+            return context.countContext[args[0]][context.countContextIndex];
+      }
+      else {
+            return context.countContext[Object.keys(context.countContext).pop()][context.countContextIndex];
+      }
+}
+
+function replaceAsterisksWithNumbers(str, arr) {
+      let index = 0;
+      return str.replace(/\[\*\]/g, (match) => {
+            if (index < arr.length) {
+                  return `[${arr[index++]}]`;
+            }
+            return match; // In case there are more [*] than array elements (shouldn't happen based on your problem description)
+      });
 }
 
 const operations = {
       range,
       field,
+      current,
       parameters,
       array,
       createArray,
@@ -1050,4 +1155,13 @@ const operations = {
 
 };
 
-module.exports = { ResolveFunctions, IsFunction, operations }
+const availableFunctions = () => {
+      let available = [];
+      for (let operation in operations) {
+            available.push(operation);
+      }
+
+      return available;
+}
+
+module.exports = { ResolveFunctions, IsFunction, availableFunctions, field, endsWith }

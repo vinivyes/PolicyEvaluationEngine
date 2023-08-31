@@ -88,7 +88,7 @@ async function runResourceGraphQuery(query) {
             const response = await axios.post(endpoint, requestBody, { headers: headers });
             return response.data;
       } catch (error) {
-            console.error('Error running query:', JSON.stringify(error.response));
+            console.error('Error running query:', error.response);
             throw error;
       }
 }
@@ -199,6 +199,27 @@ const RetrievePolicy = async (policyAssignmentId) => {
       return policyQuery.data[0]
 }
 
+const RetrieveTestCompliance = async (policyAssignmentId) => {
+      if (!authToken.token) {
+            throw new Error("You must login before you can retrieve a policy, auth token not found.")
+      }
+
+      let argQuery = `
+      policyresources
+      | where type == "microsoft.policyinsights/policystates"
+      ${policyAssignmentId ? '| where properties.policyAssignmentId =~ "' + policyAssignmentId + '"' : ''}
+      | project resourceId = tostring(properties.resourceId), complianceState=tostring(properties.complianceState)
+      `
+
+      let policyQuery = await runResourceGraphQuery(argQuery);
+
+      if (policyQuery.totalRecords == 0) {
+            throw new Error("Could not find Policy State to test")
+      }
+
+      return policyQuery.data
+}
+
 const RetrieveAliasesSync = () => {
       let isDone = false;
       let result, error;
@@ -267,4 +288,4 @@ const RetrieveAliases = async () => {
       }
 }
 
-module.exports = { LoginWithAzCLI, RetrievePolicy, runResourceGraphQuery, getResourceById, RetrieveAliases, RetrieveAliasesSync }
+module.exports = { LoginWithAzCLI, RetrievePolicy, runResourceGraphQuery, getResourceById, RetrieveAliases, RetrieveAliasesSync, RetrieveTestCompliance }

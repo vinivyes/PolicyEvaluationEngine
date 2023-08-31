@@ -1,13 +1,5 @@
-const { operations } = require('./functions');
-const availableFunctions = () => {
-      let available = [];
-      for (let operation in operations)
-            available.push(operation);
-
-      return available;
-}
-
 const propertyAccessPattern = /(?:\.([a-zA-Z_][a-zA-Z_0-9]*)|\[['"]?([a-zA-Z_][a-zA-Z_0-9]*)['"]?\])/g;
+const { IsFunction} = require('./functions');
 
 const ParseFunction = (f) => {
       let functionTree = {
@@ -90,7 +82,7 @@ const ParseFunction = (f) => {
                         continue;
                   }
 
-                  console.log(`Adding new Argument: ${currentArgument}`)
+                  //console.log(`Adding new Argument: ${currentArgument}`)
 
                   functionTree.args.push(currentArgument);
                   currentArgument = '';
@@ -151,30 +143,5 @@ const ParseArgument = (arg) => {
       return argumentTree;
 }
 
-const IsFunction = (f) => {
-      const getFunctionName = (str) => {
-            // Regex to identify function patterns
-            const functionPattern = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*\((?:[^)(]+|\((?:[^)(]+|\([^)(]*\))*\))*\)/;
-            
-            const match = functionPattern.exec(str);
-            
-            // Return the function name if a match is found
-            return match ? match[1] : null;
-      };
-
-      let availableFunction = false;
-      
-      for (let af of availableFunctions()) {
-            if(availableFunction)
-                  continue;
-
-            if (af == getFunctionName(f) || af == `${getFunctionName(f)}Function`) {
-                  availableFunction = true;
-            }
-      }
-
-      return availableFunction;
-}
-
-module.exports = { ParseFunction, IsFunction }
+module.exports = { ParseFunction }
 

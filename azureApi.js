@@ -2,6 +2,7 @@ const authToken = {
       token: ''
 };
 const axios = require('axios');
+var deasync = require('deasync');
 
 function sortApiVersions(versions) {
       return versions.sort((a, b) => {
@@ -15,8 +16,12 @@ function sortApiVersions(versions) {
       });
 }
 
-async function getLatestApiVersion(subscriptionId, provider) {
-      const endpoint = `https://management.azure.com/subscriptions/${subscriptionId}/providers/${provider}?api-version=0`;
+async function getLatestApiVersion(id, subscriptionId, provider) {
+      if (apiVersions[provider]) {
+            return apiVersions[provider];
+      }
+
+      const endpoint = id ? `https://management.azure.com${id}?api-version=0` : `https://management.azure.com/subscriptions/${subscriptionId}/providers/${provider}?api-version=0`;
       const headers = {
             'Authorization': `Bearer ${authToken.token}`
       };
@@ -25,16 +30,26 @@ async function getLatestApiVersion(subscriptionId, provider) {
             const apiVersions = response.data.resourceTypes[0].apiVersions;
             return apiVersions[0];
       } catch (error) {
-            if (error.response && error.response.data && error.response.data.error && error.response.data.error.message) {
-                  const errorMsg = error.response.data.error.message;
-                  const match = errorMsg.match(/The supported api-versions are '([\d\-,\s\w\.]+)'/);
-                  if (match && match[1]) {
-                        const versions = match[1].split(',');
-                        const sortedVersions = sortApiVersions(versions);
-                        return sortedVersions[0];
+            if (error.response && error.response.data) {
+                  error.response.data = typeof error.response.data === 'object' ? error.response.data : JSON.parse(error.response.data);
+                  if (error.response.data.error && error.response.data.error.message) {
+                        const errorMsg = error.response.data.error.message;
+                        const match = errorMsg.match(/versions are '([\d\-,\s\w\.]+)'/);
+                        if (match && match[1]) {
+                              const versions = match[1].split(',');
+                              const sortedVersions = sortApiVersions(versions);
+                              return sortedVersions[0];
+                        }
                   }
             }
-            console.error('Error getting API version:', error);
+
+            if (error.response.status != 404) {
+                  console.error('Error getting API version:', error);
+            }
+            else {
+                  console.log(`Could not vi`)
+            }
+
             throw error;
       }
 }
@@ -47,12 +62,20 @@ function extractProviderFromResourceId(resourceId) {
       return `${parts[0]}/${parts[1]}`;
 }
 
+const apiVersions = {
+
+}
+
 async function getResourceById(resourceId, forceApiVersion) {
       const provider = extractProviderFromResourceId(resourceId);
       const subscriptionId = resourceId.split('/')[2];
 
-      const apiVersion = forceApiVersion ? forceApiVersion : await getLatestApiVersion(subscriptionId, provider);
+      const apiVersion = forceApiVersion ? forceApiVersion : await getLatestApiVersion(!resourceId.includes('/providers/') ? resourceId : null, subscriptionId, provider);
       const endpoint = `https://management.azure.com${resourceId}?api-version=${apiVersion}`;
+
+      if (!forceApiVersion) {
+            apiVersions[provider] = apiVersion;
+      }
 
       const headers = {
             'Authorization': `Bearer ${authToken.token}`
@@ -60,12 +83,16 @@ async function getResourceById(resourceId, forceApiVersion) {
 
       try {
             const response = await axios.get(endpoint, { headers });
-            return response.data;
+            return {
+                  apiVersion: apiVersion,
+                  resource: response.data
+            };
       } catch (error) {
             console.error('Error getting resource:', error);
             throw error;
       }
 }
+
 
 async function runResourceGraphQuery(query) {
       if (!authToken.token) {
@@ -199,7 +226,85 @@ const RetrievePolicy = async (policyAssignmentId) => {
       return policyQuery.data[0]
 }
 
-const RetrieveTestCompliance = async (policyAssignmentId) => {
+const RetrievePolicyDefinition = async (policyDefinitionId) => {
+      if (!authToken.token) {
+            throw new Error("You must login before you can retrieve a policy, auth token not found.")
+      }
+
+      let argQuery = `
+      policyresources
+      | where type =~ "microsoft.authorization/policyassignments"
+      | where properties.policyDefinitionId contains "/microsoft.authorization/policySetDefinitions/"
+      | extend policySetDefinitionId=tolower(tostring(properties.policyDefinitionId))
+      | join kind=leftouter (
+        policyresources
+        | where type =~ "microsoft.authorization/policySetDefinitions"
+        | extend policySetDefinitionId=tolower(tostring(['id']))
+        | mv-expand policyDefinition=properties.policyDefinitions limit 400
+        | summarize by policyDefinitionId=tostring(policyDefinition.policyDefinitionId), policySetDefinitionId
+      ) on $left.policySetDefinitionId == $right.policySetDefinitionId
+      | project id, policyDefinitionId
+      | union (
+        policyresources
+        | where type =~ "microsoft.authorization/policyassignments"
+        | where properties.policyDefinitionId !contains "/microsoft.authorization/policySetDefinition/"
+        | project id, policyDefinitionId=tostring(properties.policyDefinitionId)
+      )
+      | project 
+      policyAssignmentID = id, 
+      policyDefinitionId,
+      parameters = properties.parameters
+      | join kind=inner ( 
+            policyresources
+            | where type =~ "Microsoft.Authorization/policyDefinitions"
+            ${policyDefinitionId ? '| where id =~ "' + policyDefinitionId + '"' : ''}
+            | project 
+            PolicyDefinitionID = id,
+            DefinitionDisplayName = tostring(properties.displayName),
+            DefinitionParameters = properties.parameters,
+            PolicyRule = tostring(properties.policyRule)
+      )   on $left.PolicyDefinitionID == $right.PolicyDefinitionID
+      | extend Parameters=bag_merge(Parameters, DefinitionParameters)
+      | mv-expand Parameters limit 400
+      | extend Parameters=pack_dictionary(tostring(bag_keys(Parameters)[0]),coalesce(Parameters[tostring(bag_keys(Parameters)[0])].value,Parameters[tostring(bag_keys(Parameters)[0])].defaultValue))
+      | summarize Parameters=make_bag(Parameters) by PolicyAssignmentID, PolicyDefinitionID, DefinitionDisplayName, AssignmentDisplayName, PolicyRule
+      | extend PolicyRule=todynamic(PolicyRule)
+      | limit 1
+      `
+
+      let policyQuery = await runResourceGraphQuery(argQuery);
+
+      if (policyQuery.totalRecords == 0) {
+            throw new Error("Could not find Policy Assignment")
+      }
+
+      return policyQuery.data[0]
+}
+
+const RetrieveTestPolicies = async () => {
+      if (!authToken.token) {
+            throw new Error("You must login before you can retrieve a policy, auth token not found.")
+      }
+
+      let argQuery = `
+      policyresources
+      | where type == "microsoft.policyinsights/policystates"
+      | where properties.policyDefinitionAction in~ ("Audit", "Deny", "Modify", "Append")
+      | where isempty(properties.policySetDefinitionId) or isnull(properties.policySetDefinitionId)
+      | summarize by policyAssignmentId=tostring(properties.policyAssignmentId), policyDefinitionId=tostring(properties.policyDefinitionId)
+      `
+
+      let policyQuery = await runResourceGraphQuery(argQuery);
+
+      if (policyQuery.totalRecords == 0) {
+            throw new Error("Could not find Policy State to test")
+      }
+
+      return policyQuery.data
+
+}
+
+const RetrieveTestCompliance = async (policyAssignmentId, policyDefinitionId) => {
       if (!authToken.token) {
             throw new Error("You must login before you can retrieve a policy, auth token not found.")
       }
@@ -208,6 +313,7 @@ const RetrieveTestCompliance = async (policyAssignmentId) => {
       policyresources
       | where type == "microsoft.policyinsights/policystates"
       ${policyAssignmentId ? '| where properties.policyAssignmentId =~ "' + policyAssignmentId + '"' : ''}
+      ${policyDefinitionId ? '| where properties.policyDefinitionId =~ "' + policyDefinitionId + '"' : ''}
       | project resourceId = tostring(properties.resourceId), complianceState=tostring(properties.complianceState)
       `
 
@@ -220,33 +326,6 @@ const RetrieveTestCompliance = async (policyAssignmentId) => {
       return policyQuery.data
 }
 
-const RetrieveAliasesSync = () => {
-      let isDone = false;
-      let result, error;
-  
-      RetrieveAliases()
-          .then(res => {
-              result = res;
-              isDone = true;
-          })
-          .catch(err => {
-              error = err;
-              isDone = true;
-          });
-  
-      // This loop will "freeze" the event loop until the promise resolves or rejects.
-      // This can be harmful to your application's performance.
-      while (!isDone) {
-          require('deasync').runLoopOnce();
-      }
-  
-      if (error) {
-          throw error;
-      }
-  
-      return result;
-}
-
 const RetrieveAliases = async () => {
       const endpoint = `https://management.azure.com/providers?$expand=resourceTypes%2Faliases&api-version=2021-04-01`;
       const headers = {
@@ -255,18 +334,22 @@ const RetrieveAliases = async () => {
       try {
             const response = await axios.get(endpoint, { headers });
             let aliases = [
-                  {"name":"id","defaultPath":"id"},
-                  {"name":"location","defaultPath":"location"},
-                  {"name":"type","defaultPath":"type"},
-                  {"name":"kind","defaultPath":"kind"},
-                  {"name":"name","defaultPath":"name"},
-                  {"name":"fullName","defaultPath":"id"},
-                  {"name":"tags","defaultPath":"tags"}
+                  { "name": "id", "defaultPath": "id" },
+                  { "name": "location", "defaultPath": "location" },
+                  { "name": "identity", "defaultPath": "identitty" },
+                  { "name": "extendedLocation", "defaultPath": "extendedLocation" },
+                  { "name": "identity.type", "defaultPath": "identity.type" },
+                  { "name": "identity.userAssignedIdentities", "defaultPath": "identity.userAssignedIdentities" },
+                  { "name": "type", "defaultPath": "type" },
+                  { "name": "kind", "defaultPath": "kind" },
+                  { "name": "name", "defaultPath": "name" },
+                  { "name": "fullName", "defaultPath": "id" },
+                  { "name": "tags", "defaultPath": "tags" }
             ]
 
             for (let namespace of response.data.value) {
                   for (let resourceType of namespace.resourceTypes) {
-                        for(let alias of resourceType.aliases){
+                        for (let alias of resourceType.aliases) {
                               aliases.push(alias);
                         }
                   }
@@ -288,4 +371,4 @@ const RetrieveAliases = async () => {
       }
 }
 
-module.exports = { LoginWithAzCLI, RetrievePolicy, runResourceGraphQuery, getResourceById, RetrieveAliases, RetrieveAliasesSync, RetrieveTestCompliance }
+module.exports = { LoginWithAzCLI, RetrievePolicy, runResourceGraphQuery, getResourceById,  RetrieveAliases, RetrieveTestCompliance, RetrieveTestPolicies }

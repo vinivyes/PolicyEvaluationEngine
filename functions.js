@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { RetrieveAliases, RetrieveAliasesSync } = require('./azureApi');
+const {  getResourceById, RetrieveAliases } = require('./azureApi');
 const fs = require('fs');
 
 const IsFunction = (f) => {
@@ -48,32 +48,64 @@ const getPropertyFromObject = (obj, properties) => {
       return obj;
 };
 
-const ResolveFunctions = (functionTree, context) => {
+const ResolveFunctions = async (functionTree, context, depth = 0) => {
       if (functionTree.type != "Function") {
             throw new Error(`Not a function...`);
       }
+      
       let argValues = [];
 
       for (let arg of functionTree.args) {
             if (arg.type == "Function") {
-                  arg.value = ResolveFunctions(arg, context);
+                  arg.value = await ResolveFunctions(arg, context, depth++);
             }
 
             argValues.push(arg.value);
       }
-
       functionTree.args = argValues;
       //console.log(`Resolving Function:`, functionTree.method);
-      const result = typeof operations[functionTree.method] === "function"
-            ? operations[functionTree.method](argValues, context)
-            : new Error(`Function ${functionTree.method} not found!`);
+      const result = await functionRunner(operations[functionTree.method.toLowerCase()],argValues, context);
 
       if (functionTree.properties) {
+            let propertyValues = [];
+      
+            for(let property of functionTree.properties) {
+                  if(typeof property == "object"){
+                        if(property.type == "Function" && availableFunctions().filter((f) => `${f}`.toLowerCase() == `${property.method}`.toLowerCase()).length > 0){
+                              let result = await ResolveFunctions(property, context, depth++);
+                              propertyValues.push(result);      
+                              continue;                  
+                        }
+                  }
+      
+                  propertyValues.push(property);
+            };
+
+            functionTree.properties = propertyValues;
+
             return getPropertyFromObject(result, functionTree.properties);
       }
 
       return result;
 }
+
+
+// Dynamic function handler
+async function functionRunner(func, args, context) {
+      return await new Promise((resolve, reject) => {
+          try {
+              const result = func(args, context);
+              
+              if (result instanceof Promise) {
+                  result.then(resolve).catch(reject);
+              } else {
+                  resolve(result);
+              }
+          } catch (error) {
+              reject(error);
+          }
+      });
+  }
 
 const equals = (args) => {
       if (Array.isArray(args)) {
@@ -85,7 +117,10 @@ const equals = (args) => {
             throw new Error(`Call this function using 'Array' type arguments`);
       }
 
-      return String(args[0]) == String(args[1])
+      args[0] = args[0] ? args[0] : '';
+      args[1] = args[1] ? args[1] : '';
+
+      return String(args[0]).toLowerCase() == String(args[1]).toLowerCase()
 }
 
 const not = (args) => {
@@ -114,10 +149,10 @@ const base64 = (args) => {
       return btoa(args[0])
 }
 
-const base64ToString = (args) => {
+const base64tostring = (args) => {
       if (Array.isArray(args)) {
             if (args.length != 1) {
-                  throw new Error(`Expected 1 arguments on function 'base64ToString', got ${args.length}`);
+                  throw new Error(`Expected 1 arguments on function 'base64tostring', got ${args.length}`);
             }
       }
       else {
@@ -127,10 +162,10 @@ const base64ToString = (args) => {
       return atob(`${args[0]}`)
 }
 
-const base64ToJson = (args) => {
+const base64tojson = (args) => {
       if (Array.isArray(args)) {
             if (args.length != 1) {
-                  throw new Error(`Expected 1 arguments on function 'base64ToJson', got ${args.length}`);
+                  throw new Error(`Expected 1 arguments on function 'base64tojson', got ${args.length}`);
             }
       }
       else {
@@ -203,14 +238,16 @@ const contains = (args) => {
             }
             return false;
       }
-      else {
-            return String(args[0]).includes(String(args[1]))
+      else {      
+            args[0] = args[0] ? args[0] : '';
+            args[1] = args[1] ? args[1] : '';
+            return String(args[0]).toLocaleLowerCase().includes(String(args[1].toLocaleLowerCase()))
       }
 }
 
 
 
-const dataUri = (args) => {
+const datauri = (args) => {
       if (Array.isArray(args) && args.length === 1) {
             const stringToConvert = args[0];
 
@@ -220,17 +257,17 @@ const dataUri = (args) => {
             // Return the formatted data URI
             return `data:text/plain;charset=utf8;base64,${base64String}`;
       } else {
-            throw new Error(`Expected 1 argument for 'dataUri' function, got ${args.length}`);
+            throw new Error(`Expected 1 argument for 'datauri' function, got ${args.length}`);
       }
 }
 
-// Helper function to convert a dataUri back to a string
-const dataUriToString = (args) => {
+// Helper function to convert a datauri back to a string
+const datauritostring = (args) => {
       if (Array.isArray(args) && args.length === 1) {
-            const dataUri = args[0];
+            const datauri = args[0];
 
             // Extract the base64 part of the data URI
-            const base64Match = dataUri.match(/base64,(.*)$/);
+            const base64Match = datauri.match(/base64,(.*)$/);
             if (!base64Match) {
                   throw new Error('Invalid data URI format');
             }
@@ -238,7 +275,7 @@ const dataUriToString = (args) => {
             // Decode the base64 string to get the original string
             return Buffer.from(base64Match[1], 'base64').toString('utf8');
       } else {
-            throw new Error(`Expected 1 argument for 'dataUriToString' function, got ${args.length}`);
+            throw new Error(`Expected 1 argument for 'datauritostring' function, got ${args.length}`);
       }
 }
 
@@ -279,10 +316,10 @@ const json = (args) => {
       return JSON.parse(`${args[0]}`)
 }
 
-const startsWith = (args) => {
+const startswith = (args) => {
       if (Array.isArray(args)) {
             if (args.length !== 2) {
-                  throw new Error(`Expected 2 arguments for 'startsWith', got ${args.length}`);
+                  throw new Error(`Expected 2 arguments for 'startswith', got ${args.length}`);
             }
       } else {
             throw new Error(`Call this function using 'Array' type arguments`);
@@ -291,13 +328,13 @@ const startsWith = (args) => {
       let stringToSearch = String(args[0]);
       let stringToFind = String(args[1]);
 
-      return stringToSearch.toLowerCase().startsWith(stringToFind.toLowerCase());
+      return stringToSearch.toLowerCase().startswith(stringToFind.toLowerCase());
 }
 
-const endsWith = (args) => {
+const endswith = (args) => {
       if (Array.isArray(args)) {
             if (args.length !== 2) {
-                  throw new Error(`Expected 2 arguments for 'endsWith', got ${args.length}`);
+                  throw new Error(`Expected 2 arguments for 'endswith', got ${args.length}`);
             }
       } else {
             throw new Error(`Call this function using 'Array' type arguments`);
@@ -473,14 +510,14 @@ const take = (args) => {
       return args[0].slice(0, args[1]);
 };
 
-const toLower = (args) => {
+const tolower = (args) => {
       if (args.length !== 1) {
             throw new Error(`Expected 1 argument for 'toLower', got ${args.length}`);
       }
       return args[0].toLowerCase();
 };
 
-const toUpper = (args) => {
+const toupper = (args) => {
       if (args.length !== 1) {
             throw new Error(`Expected 1 argument for 'toUpper', got ${args.length}`);
       }
@@ -501,29 +538,29 @@ const uri = (args) => {
 
       const [baseUri, relativeUri] = args;
 
-      if (baseUri.endsWith('/')) {
+      if (baseUri.endswith('/')) {
             return baseUri + relativeUri;
-      } else if (!baseUri.includes('/') || baseUri.endsWith('//')) {
+      } else if (!baseUri.includes('/') || baseUri.endswith('//')) {
             return baseUri + relativeUri;
       } else {
-            return baseUri.substring(0, baseUri.lastIndexOf('/') + 1) + relativeUri;
+            return baseUri.substring(0, baseUri.lastindexof('/') + 1) + relativeUri;
       }
 };
 
-const uriComponent = (args) => {
+const uricomponent = (args) => {
       if (!Array.isArray(args) || args.length !== 1) {
-            throw new Error("Expected an array with 1 argument for the 'uriComponent' function.");
+            throw new Error("Expected an array with 1 argument for the 'uricomponent' function.");
       }
 
-      return encodeURIComponent(args[0]);
+      return encodeuricomponent(args[0]);
 };
 
-const uriComponentToString = (args) => {
+const uricomponenttostring = (args) => {
       if (!Array.isArray(args) || args.length !== 1) {
-            throw new Error("Expected an array with 1 argument for the 'uriComponentToString' function.");
+            throw new Error("Expected an array with 1 argument for the 'uricomponenttostring' function.");
       }
 
-      return decodeURIComponent(args[0]);
+      return decodeuricomponent(args[0]);
 };
 
 const subscription = (args, context) => {
@@ -543,7 +580,7 @@ const subscription = (args, context) => {
       }
 }
 
-const resourceGroup = (args, context) => {
+const resourcegroup = async (args, context) => {
       if (args ? args.length !== 0 : false) {
             throw new Error("Expected 0 arguments for the 'resourceGroup' function.");
       }
@@ -552,15 +589,13 @@ const resourceGroup = (args, context) => {
       }
 
       let id = take([context.id.split("/"), 5]).join('/')
-      let name = take([skip([context.id.split("/"), 4]), 1])
 
-      return {
-            id: id,
-            name: name
-      }
+      let rg = getResourceById(id);
+
+      return rg
 }
 
-function createObject(args) {
+function createobject(args) {
       if (args.length % 2 !== 0) {
             throw new Error('The function expects an even number of parameters.');
       }
@@ -687,14 +722,14 @@ function bool(args) {
       return !!args[0] && (args[0] !== "false");
 }
 
-function falseFunction() {
+function falsefunction() {
       return false;
 }
-function trueFunction() {
+function truefunction() {
       return true;
 }
 
-function ifFunction(args) {
+function iffunction(args) {
       if (!Array.isArray(args) || args.length != 3) {
             throw new Error("Expected 3 arguments for the 'if' function");
       }
@@ -708,9 +743,9 @@ function or(args) {
       return args.some(val => val === true);
 }
 
-const dateTimeAdd = (args) => {
+const datetimeadd = (args) => {
       if (args.length < 2 || args.length > 3) {
-            throw new Error(`Expected 2 or 3 arguments on function 'dateTimeAdd', got ${args.length}`);
+            throw new Error(`Expected 2 or 3 arguments on function 'datetimeadd', got ${args.length}`);
       }
 
       const base = new Date(args[0]);
@@ -742,9 +777,9 @@ const dateTimeAdd = (args) => {
       }
 };
 
-function dateTimeFromEpoch(args) {
+function datetimefromepoch(args) {
       if (args.length !== 1) {
-            console.error('Invalid number of parameters provided for dateTimeFromEpoch function');
+            console.error('Invalid number of parameters provided for datetimefromepoch function');
             return;
       }
 
@@ -754,9 +789,9 @@ function dateTimeFromEpoch(args) {
 }
 
 
-function dateTimeToEpoch(args) {
+function datetimetoepoch(args) {
       if (args.length !== 1) {
-            console.error('Invalid number of parameters provided for dateTimeToEpoch function');
+            console.error('Invalid number of parameters provided for datetimetoepoch function');
             return;
       }
 
@@ -767,9 +802,9 @@ function dateTimeToEpoch(args) {
 }
 
 
-function utcNow(args) {
+function utcnow(args) {
       if (args.length > 1) {
-            console.error('Invalid number of parameters provided for utcNow function');
+            console.error('Invalid number of parameters provided for utcnow function');
             return;
       }
 
@@ -811,9 +846,9 @@ const greater = (args) => {
       return args[0] > args[1];
 };
 
-const greaterOrEquals = (args) => {
+const greaterorequals = (args) => {
       if (args.length !== 2) {
-            throw new Error("Expected 2 arguments for 'greaterOrEquals', but got " + args.length);
+            throw new Error("Expected 2 arguments for 'greaterorequals', but got " + args.length);
       }
 
       if ((typeof args[0] !== 'string' && typeof args[0] !== 'number') ||
@@ -845,7 +880,7 @@ const less = (args) => {
       return args[0] < args[1];
 };
 
-const lessOrEquals = (args) => {
+const lessorequals = (args) => {
       if (args.length !== 2) {
             throw new Error("Expected 2 arguments for 'less', but got " + args.length);
       }
@@ -870,17 +905,17 @@ const array = (args) => {
       return [args[0]];
 };
 
-const createArray = (args) => {
+const createarray = (args) => {
       return args;
 };
 
-const indexOf = (args) => {
+const indexof = (args) => {
       if (!Array.isArray(args)) {
             throw new Error("Expected an array argument for 'args'");
       }
 
       if (args.length !== 2) {
-            throw new Error(`Expected 2 arguments for 'indexOf', got ${args.length}`);
+            throw new Error(`Expected 2 arguments for 'indexof', got ${args.length}`);
       }
 
       let [searchContainer, itemToFind] = args;
@@ -892,7 +927,7 @@ const indexOf = (args) => {
                   }
             }
       } else if (typeof searchContainer === "string" && typeof itemToFind === "string") {
-            return searchContainer.toLowerCase().indexOf(itemToFind.toLowerCase());
+            return searchContainer.toLowerCase().indexof(itemToFind.toLowerCase());
       } else {
             throw new Error("Invalid argument types provided");
       }
@@ -900,13 +935,13 @@ const indexOf = (args) => {
       return -1;
 }
 
-const lastIndexOf = (args) => {
+const lastindexof = (args) => {
       if (!Array.isArray(args)) {
             throw new Error("Expected an array argument for 'args'");
       }
 
       if (args.length !== 2) {
-            throw new Error(`Expected 2 arguments for 'lastIndexOf', got ${args.length}`);
+            throw new Error(`Expected 2 arguments for 'lastindexof', got ${args.length}`);
       }
 
       let [searchContainer, itemToFind] = args;
@@ -918,7 +953,7 @@ const lastIndexOf = (args) => {
                   }
             }
       } else if (typeof searchContainer === "string" && typeof itemToFind === "string") {
-            return searchContainer.toLowerCase().lastIndexOf(itemToFind.toLowerCase());
+            return searchContainer.toLowerCase().lastindexof(itemToFind.toLowerCase());
       } else {
             throw new Error("Invalid argument types provided");
       }
@@ -977,7 +1012,7 @@ const inMemory = {
       aliases: null
 }
 
-const field = (args, context, pathOnly = false) => {
+const field = async (args, context, pathOnly = false) => {
       if (!Array.isArray(args)) {
             throw new Error(`Call this function using 'Array' type arguments`);
       }
@@ -994,21 +1029,25 @@ const field = (args, context, pathOnly = false) => {
             if (fs.existsSync('./aliases.json'))
                   inMemory.aliases = JSON.parse(fs.readFileSync('./aliases.json', 'utf-8'))
             else {
-                  let aliases = RetrieveAliasesSync();
+                  let aliases = await RetrieveAliases();
                   inMemory.aliases = aliases;
                   fs.writeFileSync('./aliases.json', JSON.stringify(aliases), { encoding: 'utf-8' });
             }
       }
       let path = null;
       for (let alias of inMemory.aliases) {
-            if (alias.name === args[0]) {
+            if (alias.name.toLowerCase() === args[0].toLowerCase()) {
                   //console.log(alias)
                   path = `${alias.defaultPath}`
             }
       }
 
-      if (!path)
+      if (!path && !`${args[0]}`.toLowerCase().startsWith('tags['))
             throw new Error(`Alias '${args[0]}' was not`);
+      else if(`${args[0]}`.toLowerCase().startsWith('tags[')){
+            let tagName = `${`${args[0]}`.split('[')[1]}`.split(']')[0];
+            return getPropertyFromObject(context.resource, ['tags',tagName]);
+      }
 
       if (pathOnly)
             return path;
@@ -1019,7 +1058,7 @@ const field = (args, context, pathOnly = false) => {
 
       let propertyPaths = path.split('.');
 
-      if (propertyPaths.some((p) => endsWith([p, '[*]']))) {
+      if (propertyPaths.some((p) => endswith([p, '[*]']))) {
             const expandArray = (baseContext, remainingPath, depth = 0) => {
                   if (depth > 50) {
                         throw new Error("Exceeded allowed depth of 50");
@@ -1027,9 +1066,13 @@ const field = (args, context, pathOnly = false) => {
                   let results = [];
                   for (let p = 0; p < remainingPath.length; p++) {
                         let path = remainingPath[p];
-                        if (endsWith([path, '[*]'])) {
+                        if (endswith([path, '[*]'])) {
                               let items = getPropertyFromObject(baseContext, [path.substring(0, path.length - 3)]);
                               //console.log(`Running field function:`,JSON.stringify(baseContext), JSON.stringify(items));
+                              if(!items){
+                                    return [];
+                              }
+
                               for (let item of items) {
                                     results.push(expandArray(item, remainingPath.slice(p + 1, remainingPath.length), ++depth))
                               }
@@ -1043,6 +1086,10 @@ const field = (args, context, pathOnly = false) => {
             }
             let currentValue = expandArray(context.resource, propertyPaths);
 
+            if(args[0].toLowerCase() == 'fullname'){
+                  currentValue = extractFullName(currentValue);
+            }
+
             return currentValue;
       }
       else {
@@ -1050,6 +1097,23 @@ const field = (args, context, pathOnly = false) => {
       }
 }
 
+function extractFullName(resourceId) {
+      // Split the resource ID by slashes
+      const parts = resourceId.split('/');
+  
+      // Find the first occurrence of "providers" and start processing after it
+      const providerIndex = parts.indexOf("providers");
+      if (providerIndex === -1) return ""; // if "providers" not found, return empty
+  
+      // Filter out the resource names after "providers"
+      const nameParts = [];
+      for (let i = providerIndex + 3; i < parts.length; i += 2) {
+          nameParts.push(parts[i]);
+      }
+  
+      return nameParts.join('/');
+  }
+  
 function current(args, context) {
       if (!Array.isArray(args)) {
             throw new Error(`Call this function using 'Array' type arguments`);
@@ -1081,25 +1145,38 @@ function replaceAsterisksWithNumbers(str, arr) {
       });
 }
 
+const requestcontext = (args, context) => {
+      if (!Array.isArray(args)) {
+            throw new Error(`Call this function using 'Array' type arguments`);
+      }
+
+      if (args.length > 0) {
+            throw new Error(`Expected a maximum of 0 arguments for function 'requestContext', got ${args.length}`);
+      }
+
+      return context.request;
+}
+
 const operations = {
+      requestcontext,
       range,
       field,
       current,
       parameters,
       array,
-      createArray,
+      createarray,
       greater,
-      greaterOrEquals,
+      greaterorequals,
       less,
-      lessOrEquals,
+      lessorequals,
       coalesce,
-      dateTimeAdd,
-      dateTimeFromEpoch,
-      dateTimeToEpoch,
-      utcNow,
-      trueFunction,
-      falseFunction,
-      ifFunction,
+      datetimeadd,
+      datetimefromepoch,
+      datetimetoepoch,
+      utcnow,
+      truefunction,
+      falsefunction,
+      iffunction,
       and,
       or,
       bool,
@@ -1112,26 +1189,26 @@ const operations = {
       float,
       int,
       base64,
-      base64ToJson,
-      base64ToString,
-      createObject,
+      base64tojson,
+      base64tostring,
+      createobject,
       concat,
       contains,
-      dataUri,
-      dataUriToString,
-      endsWith,
+      datauri,
+      datauritostring,
+      endswith,
       empty,
       equals,
       first,
       format,
       not,
       json,
-      startsWith,
+      startswith,
       guid,
-      indexOf,
+      indexof,
       join,
       last,
-      lastIndexOf,
+      lastindexof,
       newGuid,
       length,
       padLeft,
@@ -1141,14 +1218,14 @@ const operations = {
       string,
       substring,
       subscription,
-      resourceGroup,
-      toLower,
-      toUpper,
+      resourcegroup,
+      tolower,
+      toupper,
       trim,
       take,
       uri,
-      uriComponent,
-      uriComponentToString,
+      uricomponent,
+      uricomponenttostring,
       intersection,
       union,
       items
@@ -1164,4 +1241,4 @@ const availableFunctions = () => {
       return available;
 }
 
-module.exports = { ResolveFunctions, IsFunction, availableFunctions, field, endsWith }
+module.exports = { ResolveFunctions, IsFunction, availableFunctions, field, endswith }

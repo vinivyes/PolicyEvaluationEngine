@@ -1,21 +1,20 @@
-const { IsFunction, ResolveFunctions, field, endsWith } = require('./functions');
+const { IsFunction, ResolveFunctions, field, endswith } = require('./functions');
 const { ParseFunction } = require('./parser');
 
-const ResolveCondition = (c, context, depth = 0) => {
+const ResolveCondition = async (c, context, depth = 0) => {
       //console.log(`Resolving with Depth: ${depth}`)
+      
       let condition = {
             rawCondition: c,
             rawOperation: {},
             result: null
       }
-      
+
       let keys = Object.keys(c);
       //console.log(`Condition Keys:`, JSON.stringify(keys));
 
       if (keys.length == 1) {
-            condition.rawResult = typeof operations[keys[0]] === "function"
-            ? operations[keys[0]](c, context, depth)
-            : new Error(`Function ${keys[0]} not found!`);
+            condition.rawResult = await conditionRunner(operations[keys[0].toLowerCase()], c, context, depth)
             condition.result = condition.rawResult.result;
       }
       else if (keys.length == 2) {
@@ -39,96 +38,108 @@ const ResolveCondition = (c, context, depth = 0) => {
 
 
             if (valueKey != "count" && isFunction0 && IsFunction(`${arg0}`.substring(1, `${arg0}`.length - 1))) {
-                  arg0 = ResolveFunctions(
+                  arg0 = await ResolveFunctions(
                         ParseFunction(`${arg0}`.substring(1, `${arg0}`.length - 1)),
                         context
                   );
             }
 
             if (isFunction1 && IsFunction(`${arg1}`.substring(1, `${arg1}`.length - 1))) {
-                  arg1 = ResolveFunctions(
+                  arg1 = await ResolveFunctions(
                         ParseFunction(`${arg1}`.substring(1, `${arg1}`.length - 1)),
                         context
                   );
             }
 
             if (valueKey == "field") {
-                  arg0 = ResolveFunctions(
+                  arg0 = await ResolveFunctions(
                         ParseFunction(`field('${arg0}')`),
                         context
                   );
             }
 
-            if(valueKey == "count"){
-                  arg0 = count(c["count"], context, depth);
-                  condition.rawOperation["_count"] = arg0; 
+            if (valueKey == "count") {
+                  arg0 = await count(c["count"], context, depth);
+                  condition.rawOperation["_count"] = arg0;
                   arg0 = arg0.result;
             }
 
             //Reserved words
-            switch (operationKey) {
+            switch (operationKey.toLowerCase()) {
                   case "in":
                         operationKey = "inFunction";
                         break;
             }
 
-            condition.rawOperation["_valueKey"] = valueKey; 
+            condition.rawOperation["_valueKey"] = valueKey;
             condition.rawOperation["_opKey"] = operationKey;
 
-            condition.rawOperation["_value"] = arg0; 
+            condition.rawOperation["_value"] = arg0;
             condition.rawOperation["_op"] = arg1;
 
-            condition.result = typeof operations[operationKey] === "function"
-                  ? operations[operationKey]([arg0, arg1], context, depth)
-                  : new Error(`Function ${operationKey} not found!`);
+            condition.result = await conditionRunner(operations[operationKey.toLowerCase()], [arg0, arg1], context, depth);
 
-            if(depth == 0){
+            if (depth == 0) {
                   context.countDepthMap = null;
                   context.countContext = null;
-                  //console.log('Resetting Count Map')
             }
       }
       else {
             throw new Error('Unrecognized condition');
       }
 
-      //console.log(JSON.stringify(condition.rawCondition));
-
       return condition;
+}
+
+// Dynamic function handler
+async function conditionRunner(func, args, context, depth) {
+      return await new Promise((resolve, reject) => {
+            try {
+                  const result = func(args, context, depth);
+
+                  if (result instanceof Promise) {
+                        result.then(resolve).catch(reject);
+                  } else {
+                        resolve(result);
+                  }
+            } catch (error) {
+                  reject(error);
+            }
+      });
 }
 
 const getPropertyFromObject = (obj, properties) => {
       for (let prop of properties) {
-            if(endsWith([prop,'[*]'])){
-                  prop = prop.substring(0, prop.length-3)
+            if (endswith([prop, '[*]'])) {
+                  prop = prop.substring(0, prop.length - 3)
             }
 
-          // Check if prop contains an array access pattern, e.g., myProperty[0]
-          const parts = prop.split('[');
-  
-          // Loop over each part to handle multiple indices, e.g., myProperty[0][1]
-          for (let part of parts) {
-              part = part.replace(']', ''); // Remove the closing bracket
-              if (Number.isInteger(Number(part))) {
-                  // If part is a number, treat it as an array index
-                  obj = obj[Number(part)];
-              } else if (obj && obj.hasOwnProperty(part)) {
-                  // Otherwise, treat it as an object key
-                  obj = obj[part];
-              } else {
-                  return undefined;
-              }
-          }
+            // Check if prop contains an array access pattern, e.g., myProperty[0]
+            const parts = prop.split('[');
+
+            // Loop over each part to handle multiple indices, e.g., myProperty[0][1]
+            for (let part of parts) {
+                  part = part.replace(']', ''); // Remove the closing bracket
+                  if (Number.isInteger(Number(part))) {
+                        // If part is a number, treat it as an array index
+                        obj = obj[Number(part)];
+                  } else if (obj && obj.hasOwnProperty(part)) {
+                        // Otherwise, treat it as an object key
+                        obj = obj[part];
+                  } else {
+                        return undefined;
+                  }
+            }
       }
       return obj;
-  };
+};
 
-const count = (c, context, depth = 0) => {
+const count = async (c, context, depth = 0) => {
       let condition = {
             rawCondition: c,
             result: null
-      }            
-      
+      }
+
       let keys = Object.keys(c);
       let valueKey = keys.find(k => {
             return `${k}`.toLocaleLowerCase() == "value" || `${k}`.toLocaleLowerCase() == "field"
@@ -136,58 +147,57 @@ const count = (c, context, depth = 0) => {
 
       let results = [];
 
-      if(valueKey == "field"){
-      
-            let path = field([c["field"]], context, true);
+      if (valueKey == "field") {
+
+            let path = await field([c["field"]], context, true);
             let loadPath = replaceAsterisksWithNumbers(path, context.countDepthMap)
             let array = getPropertyFromObject(context.resource, loadPath.split('.'));
-            
-            if(!context.countDepthMap){
+
+            if (!context.countDepthMap) {
                   context.countDepthMap = [0]
             }
-            else if(context.countDepthMap.length < depth){
+            else if (context.countDepthMap.length < depth) {
                   context.countDepthMap.push(0);
             }
 
-            if(!array && !Array.isArray(array)){
-                  throw new Error('Field does not return an array inside count');
+            if (array && Array.isArray(array)) {
+                  let maxCount = array.length;
+
+                  for (let r = 0; r < maxCount; r++) {
+                        context.countDepthMap[context.countDepthMap.length - 1] = r;
+                        let result = await ResolveCondition(c["where"], context, depth + 1);
+                        //console.log(`copy index ${r}`,result);
+                        results.push(result);
+                  }
+                  context.countDepthMap[context.countDepthMap.length - 1] = 0;
             }
-      
-            let maxCount = array.length;
-      
-            for(let r = 0; r < maxCount; r++){
-                  context.countDepthMap[context.countDepthMap.length-1] = r;
-                  let result = ResolveCondition(c["where"], context, depth + 1);
-                  //console.log(`copy index ${r}`,result);
-                  results.push(result);
-            }
-            context.countDepthMap[context.countDepthMap.length-1] = 0;
       }
 
-      if(valueKey == "value"){
-            if(!context.countContext){
+
+      if (valueKey == "value") {
+            if (!context.countContext) {
                   context.countContext = {}
             }
 
             let arg0 = c[valueKey];
             let isFunction0 = `${arg0}`[0] == "[" && `${arg0}`[`${arg0}`.length - 1] == "]";
 
-            context.countContext[`${c["name"] ? c["name"] : 'global'}`] = isFunction0 ? ResolveFunctions(
+            context.countContext[`${c["name"] ? c["name"] : 'global'}`] = isFunction0 ? await ResolveFunctions(
                   ParseFunction(`${arg0}`.substring(1, `${arg0}`.length - 1)),
                   context
             ) : arg0
 
             let array = context.countContext[`${c["name"] ? c["name"] : 'global'}`];
-      
-            if(!Array.isArray(array)){
+
+            if (!Array.isArray(array)) {
                   throw new Error('Value does not return an array inside count');
             }
-      
+
             let maxCount = array.length;
-      
-            for(let r = 0; r < maxCount; r++){
+
+            for (let r = 0; r < maxCount; r++) {
                   context.countContextIndex = r;
-                  let result = ResolveCondition(c["where"], context, depth + 1);
+                  let result = await ResolveCondition(c["where"], context, depth + 1);
                   results.push(result);
             }
             context.countContextIndex = null;
@@ -199,35 +209,43 @@ const count = (c, context, depth = 0) => {
 
       condition.result = results.filter(r => r.result).length;
       condition.rawResults = results;
-      
+
       return condition;
 }
 
 function replaceAsterisksWithNumbers(str, arr) {
-      if(!arr)
+      if (!arr)
             arr = [];
+
+      if (!str || typeof str !== 'string')
+            return str;
+
+
 
       let index = 0;
       return str.replace(/\[\*\]/g, (match) => {
-          if (index < arr.length) {
-              return `[${arr[index++]}]`;
-          }
-          return match; // In case there are more [*] than array elements (shouldn't happen based on your problem description)
+            if (index < arr.length) {
+                  return `[${arr[index++]}]`;
+            }
+            return match; // In case there are more [*] than array elements (shouldn't happen based on your problem description)
       });
-  }
+}
 
-const allOf = (c, context, depth = 0) => {
+const allof = async (c, context, depth = 0) => {
       let condition = {
             rawCondition: c,
             result: null
       }
 
+      let keys = Object.keys(c);
+      let allOfKey = keys.find(k => k.toLowerCase() == "allof");
+
       let results = [];
 
-      for (let node of c.allOf) {
-            let resolution = ResolveCondition(node, context, depth);
+      for (let node of c[allOfKey]) {
+            let resolution = await ResolveCondition(node, context, depth);
             results.push(resolution);
-            if(!resolution.result)
+            if (!resolution.result)
                   break;
       }
 
@@ -237,7 +255,7 @@ const allOf = (c, context, depth = 0) => {
       return condition;
 }
 
-const anyOf = (c, context, depth = 0) => {
+const anyof = async (c, context, depth = 0) => {
       let condition = {
             rawCondition: c,
             result: null
@@ -245,9 +263,13 @@ const anyOf = (c, context, depth = 0) => {
 
       let results = [];
 
-      for (let node of c.anyOf) {
-            let resolution = results.push(ResolveCondition(node, context, depth))
-            if(resolution.result)
+      let keys = Object.keys(c);
+      let anyOfKey = keys.find(k => k.toLowerCase() == "anyof");
+
+
+      for (let node of c[anyOfKey]) {
+            let resolution = results.push(await ResolveCondition(node, context, depth))
+            if (resolution.result)
                   break;
       }
 
@@ -257,13 +279,13 @@ const anyOf = (c, context, depth = 0) => {
       return condition;
 }
 
-const not = (c, context, depth = 0) => {
+const not = async (c, context, depth = 0) => {
       let condition = {
             rawCondition: c,
             result: null
       }
 
-      let resolve = ResolveCondition(c['not'], context, depth);
+      let resolve = await ResolveCondition(c['not'], context, depth);
       condition.rawResult = resolve;
       condition.result = !resolve.result
       //console.log(JSON.stringify(resolve), !resolve.result)
@@ -273,7 +295,7 @@ const not = (c, context, depth = 0) => {
 const exists = (args) => {
       if (Array.isArray(args)) {
             if (args.length != 2) {
-                  throw new Error(`Expected 2 arguments on function 'equals', got ${args.length}`);
+                  throw new Error(`Expected 2 arguments on function 'exists', got ${args.length}`);
             }
       }
       else {
@@ -282,19 +304,22 @@ const exists = (args) => {
 
       let [arg0, arg1] = args;
 
-      if (typeof Boolean(arg1) !== 'boolean') {
+
+      arg1 = JSON.parse(`${arg1}`.toLowerCase());
+
+      if (typeof arg1 !== 'boolean') {
             throw new Error('Argument for exists should be a boolean');
       }
 
       if (Array.isArray(arg0)) {
-            return Boolean(arg1) ? arg0.length > 0 : arg0.length == 0;
+            return arg1 ? arg0.length > 0 : arg0.length == 0;
       }
       else {
-            return Boolean(arg1) ? Boolean(arg0) : !arg0;
+            return arg1 ? Boolean(arg0) : !arg0;
       }
 }
 
-const inFunction = (args) => {
+const infunction = (args) => {
       if (Array.isArray(args)) {
             if (args.length != 2) {
                   throw new Error(`Expected 2 arguments on function 'in', got ${args.length}`);
@@ -330,12 +355,16 @@ const contains = (args) => {
       }
 
       let [arg0, arg1] = args;
+      
+      arg0 = arg0 ? arg0 : '';
+      arg1 = arg1 ? arg1 : '';
+
 
       if (Array.isArray(arg0)) {
-            return arg0.every((a0) => a0.includes(arg1));
+            return arg0.every((a0) => a0.toLocaleLowerCase().includes(arg1.toLocaleLowerCase()));
       }
       else {
-            return arg0.includes(arg1);
+            return arg0.toLocaleLowerCase().includes(arg1.toLocaleLowerCase());
       }
 }
 
@@ -375,7 +404,7 @@ const match = (args) => {
       return patternMatch(args[0], args[1]);
 };
 
-const matchInsensitively = (args) => {
+const matchinsensitively = (args) => {
       if (Array.isArray(args)) {
             if (args.length != 2) {
                   throw new Error(`Expected 2 arguments on function 'matchInsensitively', got ${args.length}`);
@@ -388,7 +417,7 @@ const matchInsensitively = (args) => {
       return patternMatch(args[0].toLowerCase(), args[1].toLowerCase());
 };
 
-const containsKey = (args) => {
+const containskey = (args) => {
       if (Array.isArray(args)) {
             if (args.length != 2) {
                   throw new Error(`Expected 2 arguments on function 'containsKey', got ${args.length}`);
@@ -416,11 +445,14 @@ const equals = (args) => {
 
       let [arg0, arg1] = args;
 
+      arg0 = arg0 ? arg0 : '';
+      arg1 = arg1 ? arg1 : '';
+
       if (Array.isArray(arg0)) {
-            return arg0.every((a0) => String(a0) == String(arg1));
+            return arg0.length == 0 ? false : arg0.every((a0) => String(a0).toLowerCase() == String(arg1).toLowerCase());
       }
       else {
-            return String(arg0) == String(arg1);
+            return String(arg0).toLowerCase() == String(arg1).toLowerCase();
       }
 }
 
@@ -456,7 +488,7 @@ const greater = (args) => {
 
 };
 
-const greaterOrEquals = (args) => {
+const greaterorequals = (args) => {
       if (args.length !== 2) {
             throw new Error("Expected 2 arguments for 'greaterOrEquals', but got " + args.length);
       }
@@ -516,7 +548,7 @@ const less = (args) => {
       }
 };
 
-const lessOrEquals = (args) => {
+const lessorequals = (args) => {
       if (args.length !== 2) {
             throw new Error("Expected 2 arguments for 'less', but got " + args.length);
       }
@@ -547,26 +579,26 @@ const lessOrEquals = (args) => {
       }
 };
 
-const notContainsKey = (args) => {
-      return !containsKey(args);
+const notcontainskey = (args) => {
+      return !containskey(args);
 };
 
-const notMatch = (args) => {
+const notmatch = (args) => {
       return !match(args);
 };
 
-const notMatchInsensitively = (args) => {
-      return !matchInsensitively(args);
+const notmatchinsensitively = (args) => {
+      return !matchinsensitively(args);
 };
-const notLike = (args) => {
+const notlike = (args) => {
       return !like(args);
 }
 
-const notEquals = (args) => {
+const notequals = (args) => {
       return !equals(args);
 }
 
-const notContains = (args) => {
+const notcontains = (args) => {
       return !contains(args);
 }
 
@@ -583,36 +615,36 @@ const patternMatch = (str, pattern) => {
       return regex.test(str);
 };
 
-const notIn = (args) => {
-      return !inFunction(args);
+const notin = (args) => {
+      return !infunction(args);
 }
 
 
 
 const operations = {
-      allOf,
-      anyOf,
+      allof,
+      anyof,
       count,
       contains,
-      notContains,
-      containsKey,
-      notContainsKey,
+      notcontains,
+      containskey,
+      notcontainskey,
       not,
       like,
-      notLike,
+      notlike,
       match,
-      notMatch,
-      matchInsensitively,
-      notMatchInsensitively,
+      notmatch,
+      matchinsensitively,
+      notmatchinsensitively,
       equals,
-      notEquals,
+      notequals,
       exists,
       less,
-      lessOrEquals,
+      lessorequals,
       greater,
-      greaterOrEquals,
-      inFunction,
-      notIn
+      greaterorequals,
+      infunction,
+      notin
 }
 
 

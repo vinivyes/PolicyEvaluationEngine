@@ -1,4 +1,4 @@
-const propertyAccessPattern = /(?:\.([a-zA-Z_][a-zA-Z_0-9]*)|\[['"]?([a-zA-Z_][a-zA-Z_0-9]*)['"]?\])/g;
+const propertyAccessPattern = /(?:\.([a-zA-Z_][a-zA-Z_0-9]*)|\[['"]?([^'"\]]+)['"]?\])/g;
 const { IsFunction} = require('./functions');
 
 const ParseFunction = (f) => {
@@ -14,9 +14,12 @@ const ParseFunction = (f) => {
       let depth = 0;
       let literal = null;
       let depth0f = '';
+      let propertyAccessNumber = 0;
+
+      let propertyAccessorStart = 0;
 
       for (let c = 0; c < f.length; c++) {
-            if(depth == 0 || (depth == 1 && f[c] == ")")){
+            if((depth == 0 && propertyAccessorStart == 0) || (depth == 1 && f[c] == ")" && propertyAccessorStart == 0)){
                   depth0f += f[c];
             }
 
@@ -73,6 +76,37 @@ const ParseFunction = (f) => {
                   continue;
             }
 
+            if(f[c] == "[" && f[c+1] != "'" && f[c+1] != '"' && !literal && propertyAccessorStart == 0){
+                  depth0f += `'{${propertyAccessNumber}}'`
+                  propertyAccessNumber++;
+            }
+
+            if(f[c] == "[" && f[c+1] != "'" && f[c+1] != '"' && !literal){
+                  propertyAccessorStart++;
+                  currentArgument += f[c];
+                  continue;
+            }
+
+            if(f[c] == "]" && !literal && propertyAccessorStart > 1){
+                  propertyAccessorStart--;
+                  currentArgument += f[c];
+                  continue;
+            }
+
+            if(f[c] == "]" && !literal && propertyAccessorStart >= 1){
+                  propertyAccessorStart--;
+                  currentArgument += f[c];
+                  depth0f += f[c];
+                  functionTree.args.push(currentArgument);
+                  currentArgument = '';
+                  continue;
+            }
+
+            if(propertyAccessorStart > 0){
+                  currentArgument += f[c];
+                  continue;
+            }
+
             if (depth <= 1 && (f[c] == "," || (f[c] == ")" && ((c+1 < f.length ? f[c+1] != "." && f[c+1] != "[" : true))) || depth == 0) && !literal) {
                   if (f[c] == ")" && depth >= 1) {
                         currentArgument += f[c];
@@ -105,6 +139,25 @@ const ParseFunction = (f) => {
       while (match = propertyAccessPattern.exec(depth0f)) {
         properties.push(match[1] || match[2] || match[3]);
       }
+      properties = properties.map((property) => {
+            if(property.startsWith('{') && property.endsWith('}')){
+                  const index = functionTree.args.findIndex(n => n.type == `property`);
+
+                  let retrievedValue;
+                  if (index !== -1) {
+                        // Remove the found value from the array and get the value
+                        [retrievedValue] = functionTree.args.splice(index, 1);
+
+                        return retrievedValue.value;
+                  }
+                  else{
+                        return null;
+                  }
+            }
+            else{
+                  return property;
+            }
+      })
       if (properties.length > 0) {
         functionTree.properties = properties;
       }
@@ -113,7 +166,7 @@ const ParseFunction = (f) => {
 }
 
 const ParseArgument = (arg) => {
-      
+      arg = `${arg}`.trim();
       let argType = null;
       let argumentTree = {};
       if ((`${arg}`[0] == "'" && `${arg}`[`${arg}`.length - 1] == "'") || (`${arg}`[0] == '"' && `${arg}`[`${arg}`.length - 1] == '"')) {
@@ -130,18 +183,23 @@ const ParseArgument = (arg) => {
                   argumentTree = ParseFunction(`${arg}`)
             }
             else {
-                  argType = typeof (JSON.parse(arg));
+                  let isPropertyFunction = `${arg}`.startsWith(`[`) && `${arg}`.endsWith(`]`)
+                  let _propertyFunction = `${arg}`.substring(1,`${arg}`.length-1);
+                  argType = isPropertyFunction ? `property` : typeof (JSON.parse(arg));
                   argumentTree = {
                         type: argType,
                         method: null,
                         args: null,
-                        value: JSON.parse(arg)
+                        value: isPropertyFunction ? ParseFunction(`${_propertyFunction}`) : JSON.parse(arg)
                   }
             }
       }
       
       return argumentTree;
 }
+
+//const result = ParseFunction(`parameters('FamilySKU').myStatic[parameters('SKUFamily')[field('microsoft.compute/virtualmachines/hardwareProfile.vmSize')]][field('microsoft.compute/virtualmachines/hardwareProfile.vmSize')]['myStatic2']`)
+//console.log(result)
 
 module.exports = { ParseFunction }
 

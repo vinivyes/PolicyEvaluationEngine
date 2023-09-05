@@ -117,8 +117,8 @@ const equals = (args) => {
             throw new Error(`Call this function using 'Array' type arguments`);
       }
 
-      args[0] = args[0] ? args[0] : '';
-      args[1] = args[1] ? args[1] : '';
+      args[0] = typeof args[0] != "undefined" ? args[0] : '';
+      args[1] = typeof args[1] != "undefined" ? args[1] : '';
 
       return String(args[0]).toLowerCase() == String(args[1]).toLowerCase()
 }
@@ -239,8 +239,8 @@ const contains = (args) => {
             return false;
       }
       else {      
-            args[0] = args[0] ? args[0] : '';
-            args[1] = args[1] ? args[1] : '';
+            args[0] = typeof args[0] != "undefined" ? args[0] : '';
+            args[1] = typeof args[1] != "undefined" ? args[1] : '';
             return String(args[0]).toLocaleLowerCase().includes(String(args[1].toLocaleLowerCase()))
       }
 }
@@ -563,7 +563,7 @@ const uricomponenttostring = (args) => {
       return decodeuricomponent(args[0]);
 };
 
-const subscription = (args, context) => {
+const subscription = async (args, context) => {
       if (args ? args.length !== 0 : false) {
             throw new Error("Expected 0 arguments for the 'subscription' function.");
       }
@@ -571,13 +571,12 @@ const subscription = (args, context) => {
             throw new Error("Error getting context, contexts should have at least 'id' property.");
       }
 
-      let id = take([context.id.split("/"), 3]).join('/')
-      let subscriptionId = take([skip([context.id.split("/"), 2]), 1])
 
-      return {
-            id: id,
-            subscriptionId: subscriptionId
-      }
+      let id = take([context.id.split("/"), 3]).join('/')
+
+      let sub = await getResourceById(id);
+
+      return sub.resource
 }
 
 const resourcegroup = async (args, context) => {
@@ -590,9 +589,9 @@ const resourcegroup = async (args, context) => {
 
       let id = take([context.id.split("/"), 5]).join('/')
 
-      let rg = getResourceById(id);
+      let rg = await getResourceById(id);
 
-      return rg
+      return rg.resource
 }
 
 function createobject(args) {
@@ -1002,10 +1001,15 @@ const parameters = (args, context) => {
       if (!context.parameters)
             throw new Error(`Context has no paramaters in 'parameters' function.`);
 
-      if (!context.parameters[args[0]])
+      //Make Parameters case insensitive
+      let availableParameters = Object.keys(context.parameters);
+      let selectedParameter = availableParameters.find((p) => p.toLocaleLowerCase() == `${args[0]}`.toLocaleLowerCase());
+
+      if (!context.parameters[selectedParameter])
             throw new Error(`Context has parameters has no value for '${args[0]}' to resolve 'parameters' function.`);
 
-      return context.parameters[args[0]];
+
+      return context.parameters[selectedParameter];
 }
 
 const inMemory = {

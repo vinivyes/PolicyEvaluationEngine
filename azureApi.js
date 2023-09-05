@@ -6,18 +6,18 @@ var deasync = require('deasync');
 
 function sortApiVersions(versions) {
       return versions.sort((a, b) => {
-            if (a.includes('-preview') && !b.includes('-preview')) {
-                  return 1;  // a comes after b if a is preview but b is not.
-            } else if (!a.includes('-preview') && b.includes('-preview')) {
-                  return -1;  // a comes before b if a is not preview but b is.
-            } else {
+            //if (a.includes('-preview') && !b.includes('-preview')) {
+            //      return 1;  // a comes after b if a is preview but b is not.
+            //} else if (!a.includes('-preview') && b.includes('-preview')) {
+            //      return -1;  // a comes before b if a is not preview but b is.
+            //} else {
                   return b.localeCompare(a);  // Otherwise, sort them lexicographically in descending order.
-            }
+            //}
       });
 }
 
-async function getLatestApiVersion(id, subscriptionId, provider) {
-      if (apiVersions[provider]) {
+async function getLatestApiVersion(id, provider) {
+      if (provider && apiVersions[provider]) {
             return apiVersions[provider];
       }
 
@@ -36,21 +36,19 @@ async function getLatestApiVersion(id, subscriptionId, provider) {
                         const errorMsg = error.response.data.error.message;
                         const match = errorMsg.match(/versions are '([\d\-,\s\w\.]+)'/);
                         if (match && match[1]) {
-                              const versions = match[1].split(',');
+                              const versions = match[1].split(',').map((v) => v.trim())
                               const sortedVersions = sortApiVersions(versions);
                               return sortedVersions[0];
                         }
                   }
             }
 
-            if (error.response.status != 404) {
-                  console.error('Error getting API version:', error);
+            if (error.response.status != 404 && error.response.status != 403) {
+                  console.error('Error getting API version:', error.response.data);
             }
             else {
-                  console.log(`Could not vi`)
+                  console.log(`Could not retrieve API Version`, JSON.stringify(error))
             }
-
-            throw error;
       }
 }
 
@@ -66,14 +64,23 @@ const apiVersions = {
 
 }
 
-async function getResourceById(resourceId, forceApiVersion) {
-      const provider = extractProviderFromResourceId(resourceId);
-      const subscriptionId = resourceId.split('/')[2];
+const resources = {
 
-      const apiVersion = forceApiVersion ? forceApiVersion : await getLatestApiVersion(!resourceId.includes('/providers/') ? resourceId : null, subscriptionId, provider);
+}
+
+async function getResourceById(resourceId, forceApiVersion) {
+      if(resources[resourceId])
+            return resources[resourceId];
+
+      let provider = null;
+      if(`${resourceId}`.toLowerCase().includes('/providers/')){
+            provider = extractProviderFromResourceId(resourceId);
+      }
+      
+      const apiVersion = forceApiVersion ? forceApiVersion : await getLatestApiVersion(resourceId, provider);
       const endpoint = `https://management.azure.com${resourceId}?api-version=${apiVersion}`;
 
-      if (!forceApiVersion) {
+      if (!forceApiVersion && provider) {
             apiVersions[provider] = apiVersion;
       }
 
@@ -83,13 +90,23 @@ async function getResourceById(resourceId, forceApiVersion) {
 
       try {
             const response = await axios.get(endpoint, { headers });
-            return {
+            let value = {
                   apiVersion: apiVersion,
                   resource: response.data
             };
+
+            resources[resourceId] = value;
+            return value;
       } catch (error) {
-            console.error('Error getting resource:', error);
-            throw error;
+            if (error.response.status != 404) {
+                  console.error('Resource not found (404):', resourceId);
+            }
+            else if (error.response.status != 403) {
+                  console.error('Resource cannot be read (403):', resourceId);
+            }
+            else{
+                  console.error('Error getting resource:', JSON.stringify(error.response));
+            }
       }
 }
 
@@ -185,7 +202,7 @@ const LoginWithAzCLI = async () => {
       }
 }
 
-const RetrievePolicy = async (policyAssignmentId) => {
+const RetrievePolicy = async (policyAssignmentId, policyDefinitionId, policyDefinitionRefId) => {
       if (!authToken.token) {
             throw new Error("You must login before you can retrieve a policy, auth token not found.")
       }
@@ -194,82 +211,83 @@ const RetrievePolicy = async (policyAssignmentId) => {
       policyresources
       | where type =~ "Microsoft.Authorization/policyAssignments"
       ${policyAssignmentId ? '| where id =~ "' + policyAssignmentId + '"' : ''}
-      | project 
+      | mv-expand AssignmentParameters = properties.parameters limit 400
+      | extend AssignmentParameters = pack_dictionary(tolower(tostring(bag_keys(AssignmentParameters)[0])), AssignmentParameters[tostring(bag_keys(AssignmentParameters)[0])])
+      | summarize AssignmentParameters = make_bag(AssignmentParameters)
+      by
       PolicyAssignmentID = id, 
-      PolicyDefinitionID = tostring(properties.policyDefinitionId), 
-      AssignmentDisplayName = tostring(properties.displayName),
-      Parameters = properties.parameters
-      | where PolicyDefinitionID !contains "/policySetDefinitions/"
+      _PolicyDefinitionID = tostring(properties.policyDefinitionId), 
+      AssignmentDisplayName = tostring(properties.displayName)
+      | where _PolicyDefinitionID contains "/policySetDefinitions/"
       | join kind=inner ( 
-            policyresources
-            | where type =~ "Microsoft.Authorization/policyDefinitions"
-            | project 
+      policyresources
+      | where type =~ "Microsoft.Authorization/policySetDefinitions"
+      | mv-expand SetDefinitionParameters = properties.parameters limit 400
+      | extend SetDefinitionParameters = pack_dictionary(tolower(tostring(bag_keys(SetDefinitionParameters)[0])), SetDefinitionParameters[tostring(bag_keys(SetDefinitionParameters)[0])])
+      | summarize SetDefinitionParameters=make_bag(SetDefinitionParameters)
+            by 
+            PolicySetDefinitionID = id,
+            SetDefinitionDisplayName = tostring(properties.displayName),
+            SetDefinitions=tostring(properties.policyDefinitions)
+      | mv-expand Definition=todynamic(SetDefinitions) limit 400
+      | project PolicySetDefinitionID, SetDefinitionParameters, _DefinitionParameters=Definition.parameters, DefinitionRefId = tostring(Definition.policyDefinitionReferenceId), PolicyDefinitionID = tostring(Definition.policyDefinitionId)
+      )
+      on $left._PolicyDefinitionID == $right.PolicySetDefinitionID
+      ${policyDefinitionRefId ? '| where DefinitionRefId =~ "' + policyDefinitionRefId + '"' : ''}
+      | project-away _PolicyDefinitionID
+      | mv-expand DefParam=_DefinitionParameters limit 400
+      | extend DefParamLookup=tostring(DefParam[tostring(bag_keys(DefParam)[0])].value)
+      | extend ShouldDefParamLookup= (DefParamLookup startswith "[parameters('" and DefParamLookup endswith "')]")
+      | extend DefParamLookupPair=iif(ShouldDefParamLookup, substring(DefParamLookup, 13, indexof(DefParamLookup, "')]") - 13), '')
+      | extend SetDefinitionParameter=pack_dictionary(tolower(tostring(bag_keys(DefParam)[0])), iif(ShouldDefParamLookup, coalesce(AssignmentParameters[tolower(DefParamLookupPair)].value, SetDefinitionParameters[tolower(DefParamLookupPair)].defaultValue), todynamic(DefParamLookup)))
+      | join kind=inner ( 
+      policyresources
+      | where type =~ "Microsoft.Authorization/policyDefinitions"
+      ${policyDefinitionId ? '| where id =~ "' + policyDefinitionId + '"' : ''}
+      | project 
             PolicyDefinitionID = id,
             DefinitionDisplayName = tostring(properties.displayName),
             DefinitionParameters = properties.parameters,
             PolicyRule = tostring(properties.policyRule)
-      )   on $left.PolicyDefinitionID == $right.PolicyDefinitionID
-      | extend Parameters=bag_merge(Parameters, DefinitionParameters)
-      | mv-expand Parameters limit 400
-      | extend Parameters=pack_dictionary(tostring(bag_keys(Parameters)[0]),coalesce(Parameters[tostring(bag_keys(Parameters)[0])].value,Parameters[tostring(bag_keys(Parameters)[0])].defaultValue))
-      | summarize Parameters=make_bag(Parameters) by PolicyAssignmentID, PolicyDefinitionID, DefinitionDisplayName, AssignmentDisplayName, PolicyRule
-      | extend PolicyRule=todynamic(PolicyRule)
-      | limit 1
-      `
-
-      let policyQuery = await runResourceGraphQuery(argQuery);
-
-      if (policyQuery.totalRecords == 0) {
-            throw new Error("Could not find Policy Assignment")
-      }
-
-      return policyQuery.data[0]
-}
-
-const RetrievePolicyDefinition = async (policyDefinitionId) => {
-      if (!authToken.token) {
-            throw new Error("You must login before you can retrieve a policy, auth token not found.")
-      }
-
-      let argQuery = `
-      policyresources
-      | where type =~ "microsoft.authorization/policyassignments"
-      | where properties.policyDefinitionId contains "/microsoft.authorization/policySetDefinitions/"
-      | extend policySetDefinitionId=tolower(tostring(properties.policyDefinitionId))
-      | join kind=leftouter (
-        policyresources
-        | where type =~ "microsoft.authorization/policySetDefinitions"
-        | extend policySetDefinitionId=tolower(tostring(['id']))
-        | mv-expand policyDefinition=properties.policyDefinitions limit 400
-        | summarize by policyDefinitionId=tostring(policyDefinition.policyDefinitionId), policySetDefinitionId
-      ) on $left.policySetDefinitionId == $right.policySetDefinitionId
-      | project id, policyDefinitionId
-      | union (
-        policyresources
-        | where type =~ "microsoft.authorization/policyassignments"
-        | where properties.policyDefinitionId !contains "/microsoft.authorization/policySetDefinition/"
-        | project id, policyDefinitionId=tostring(properties.policyDefinitionId)
       )
+      on $left.PolicyDefinitionID == $right.PolicyDefinitionID
+      | mv-expand DefinitionParameter=DefinitionParameters
+      | extend DefinitionParameter = pack_dictionary(tolower(tostring(bag_keys(DefinitionParameter)[0])), DefinitionParameter[tostring(bag_keys(DefinitionParameter)[0])].defaultValue)
+      | extend SetDefinitionParameter = iif(tostring(bag_keys(DefinitionParameter)[0]) == tostring(bag_keys(SetDefinitionParameter)[0]), SetDefinitionParameter, dynamic(null))
+      | summarize SetParameters=make_bag(SetDefinitionParameter), DefParameters=make_bag(DefinitionParameter) by PolicyAssignmentID, DefinitionRefId, PolicyDefinitionID, DefinitionDisplayName, AssignmentDisplayName, PolicyRule
+      | extend Parameters = bag_merge(SetParameters, DefParameters)
+      | project-away SetParameters, DefParameters
+      | extend PolicyRule=todynamic(PolicyRule)
+      | union ( 
+      policyresources
+      | where type =~ "Microsoft.Authorization/policyAssignments"
+      ${policyAssignmentId ? '| where id =~ "' + policyAssignmentId + '"' : ''}
       | project 
-      policyAssignmentID = id, 
-      policyDefinitionId,
-      parameters = properties.parameters
+            PolicyAssignmentID = id, 
+            PolicyDefinitionID = tostring(properties.policyDefinitionId), 
+            AssignmentDisplayName = tostring(properties.displayName),
+            Parameters = properties.parameters
+      | where PolicyDefinitionID !contains "/policySetDefinitions/"
       | join kind=inner ( 
             policyresources
             | where type =~ "Microsoft.Authorization/policyDefinitions"
             ${policyDefinitionId ? '| where id =~ "' + policyDefinitionId + '"' : ''}
             | project 
-            PolicyDefinitionID = id,
-            DefinitionDisplayName = tostring(properties.displayName),
-            DefinitionParameters = properties.parameters,
-            PolicyRule = tostring(properties.policyRule)
-      )   on $left.PolicyDefinitionID == $right.PolicyDefinitionID
-      | extend Parameters=bag_merge(Parameters, DefinitionParameters)
-      | mv-expand Parameters limit 400
-      | extend Parameters=pack_dictionary(tostring(bag_keys(Parameters)[0]),coalesce(Parameters[tostring(bag_keys(Parameters)[0])].value,Parameters[tostring(bag_keys(Parameters)[0])].defaultValue))
-      | summarize Parameters=make_bag(Parameters) by PolicyAssignmentID, PolicyDefinitionID, DefinitionDisplayName, AssignmentDisplayName, PolicyRule
-      | extend PolicyRule=todynamic(PolicyRule)
-      | limit 1
+                  PolicyDefinitionID = id,
+                  DefinitionDisplayName = tostring(properties.displayName),
+                  DefinitionParameters = properties.parameters,
+                  PolicyRule = tostring(properties.policyRule),
+                  PolicyMode = tostring(properties.mode)
+                  )
+                  on $left.PolicyDefinitionID == $right.PolicyDefinitionID
+            | extend Parameters=bag_merge(Parameters, DefinitionParameters)
+            | mv-expand Parameters limit 400
+            | extend Parameters=pack_dictionary(tostring(bag_keys(Parameters)[0]), coalesce(Parameters[tostring(bag_keys(Parameters)[0])].value, Parameters[tostring(bag_keys(Parameters)[0])].defaultValue))
+            | summarize Parameters=make_bag(Parameters) by PolicyAssignmentID, PolicyDefinitionID, DefinitionDisplayName, AssignmentDisplayName, PolicyRule, PolicyMode
+            | extend PolicyRule=todynamic(PolicyRule)
+            )
+            | where PolicyMode in~ ("All", "Indexed")
+            | limit 1
       `
 
       let policyQuery = await runResourceGraphQuery(argQuery);
@@ -290,8 +308,7 @@ const RetrieveTestPolicies = async () => {
       policyresources
       | where type == "microsoft.policyinsights/policystates"
       | where properties.policyDefinitionAction in~ ("Audit", "Deny", "Modify", "Append")
-      | where isempty(properties.policySetDefinitionId) or isnull(properties.policySetDefinitionId)
-      | summarize by policyAssignmentId=tostring(properties.policyAssignmentId), policyDefinitionId=tostring(properties.policyDefinitionId)
+      | summarize by policyAssignmentId=tostring(properties.policyAssignmentId), policyDefinitionId=tostring(properties.policyDefinitionId), policyDefinitionRefId=tostring(properties.policyDefinitionReferenceId)
       `
 
       let policyQuery = await runResourceGraphQuery(argQuery);
@@ -304,7 +321,7 @@ const RetrieveTestPolicies = async () => {
 
 }
 
-const RetrieveTestCompliance = async (policyAssignmentId, policyDefinitionId) => {
+const RetrieveTestCompliance = async (policyAssignmentId, policyDefinitionId, policyDefinitionRefId, limit = 20) => {
       if (!authToken.token) {
             throw new Error("You must login before you can retrieve a policy, auth token not found.")
       }
@@ -314,7 +331,9 @@ const RetrieveTestCompliance = async (policyAssignmentId, policyDefinitionId) =>
       | where type == "microsoft.policyinsights/policystates"
       ${policyAssignmentId ? '| where properties.policyAssignmentId =~ "' + policyAssignmentId + '"' : ''}
       ${policyDefinitionId ? '| where properties.policyDefinitionId =~ "' + policyDefinitionId + '"' : ''}
+      ${policyDefinitionRefId ? '| where properties.policyDefinitionReferenceId =~ "' + policyDefinitionRefId + '"' : ''}
       | project resourceId = tostring(properties.resourceId), complianceState=tostring(properties.complianceState)
+      | limit ${limit}
       `
 
       let policyQuery = await runResourceGraphQuery(argQuery);

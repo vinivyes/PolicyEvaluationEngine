@@ -79,6 +79,7 @@ const ResolveCondition = async (c, context, depth = 0) => {
 
             condition.result = await conditionRunner(operations[operationKey.toLowerCase()], [arg0, arg1], context, depth);
 
+
             if (depth == 0) {
                   context.countDepthMap = null;
                   context.countContext = null;
@@ -88,6 +89,14 @@ const ResolveCondition = async (c, context, depth = 0) => {
             throw new Error('Unrecognized condition');
       }
 
+      switch(context.effect){
+            case "audit":
+            case "deny":
+            case "modify":
+            case "append":
+                  condition.complianceState = (condition.result ? 'NonCompliant' : 'Compliant')
+                  break;
+      }
       return condition;
 }
 
@@ -356,8 +365,8 @@ const contains = (args) => {
 
       let [arg0, arg1] = args;
       
-      arg0 = arg0 ? arg0 : '';
-      arg1 = arg1 ? arg1 : '';
+      arg0 = typeof arg0 != "undefined" ? arg0 : '';
+      arg1 = typeof arg1 != "undefined" ? arg1 : '';
 
 
       if (Array.isArray(arg0)) {
@@ -445,8 +454,8 @@ const equals = (args) => {
 
       let [arg0, arg1] = args;
 
-      arg0 = arg0 ? arg0 : '';
-      arg1 = arg1 ? arg1 : '';
+      arg0 = typeof arg0 != "undefined" ? arg0 : '';
+      arg1 = typeof arg1 != "undefined" ? arg1 : '';
 
       if (Array.isArray(arg0)) {
             return arg0.length == 0 ? false : arg0.every((a0) => String(a0).toLowerCase() == String(arg1).toLowerCase());
@@ -455,7 +464,6 @@ const equals = (args) => {
             return String(arg0).toLowerCase() == String(arg1).toLowerCase();
       }
 }
-
 
 const greater = (args) => {
       if (args.length !== 2) {

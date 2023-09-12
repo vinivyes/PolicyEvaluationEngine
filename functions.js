@@ -37,9 +37,9 @@ const getPropertyFromObject = (obj, properties) => {
                   if (Number.isInteger(Number(part))) {
                         // If part is a number, treat it as an array index
                         obj = obj[Number(part)];
-                  } else if (obj && obj.hasOwnProperty(part)) {
+                  } else if (obj && Object.keys(obj).find((p) => `${p}`.toLowerCase() == `${part}`.toLowerCase())) {
                         // Otherwise, treat it as an object key
-                        obj = obj[part];
+                        obj = obj[Object.keys(obj).find((p) => `${p}`.toLowerCase() == `${part}`.toLowerCase())];
                   } else {
                         return undefined;
                   }
@@ -54,39 +54,99 @@ const ResolveFunctions = async (functionTree, context, depth = 0) => {
       }
       
       let argValues = [];
+      let argRawValues = [];
 
-      for (let arg of functionTree.args) {
-            if (arg.type == "Function") {
-                  arg.value = await ResolveFunctions(arg, context, depth++);
+      if(functionTree.method.toLowerCase() == `iffunction`){
+            let op = functionTree.args[0];
+            let trueValue = functionTree.args[1];
+            let falseValue = functionTree.args[2];
+
+            if (op.type == "Function") {
+                  op.rawValue = await ResolveFunctions(op, context, depth++);
+                  op.value = op.rawValue.value;
             }
 
-            argValues.push(arg.value);
+            argValues.push(op.value);
+            argRawValues.push(op.rawValue);
+
+            if(op.value == true){
+                  if (trueValue.type == "Function") {
+                        trueValue.rawValue = await ResolveFunctions(trueValue, context, depth++);
+                        trueValue.value = trueValue.rawValue.value;
+                  }
+      
+                  argValues.push(trueValue.value);
+                  argValues.push(false);
+                  argRawValues.push(trueValue.rawValue);
+                  argRawValues.push(false);
+            }
+            else if(op.value == false){
+                  if (falseValue.type == "Function") {
+                        falseValue.rawValue = await ResolveFunctions(falseValue, context, depth++);
+                        falseValue.value = falseValue.rawValue.value;
+                  }
+      
+                  argValues.push(true);
+                  argValues.push(falseValue.value);
+                  argRawValues.push(true);
+                  argRawValues.push(falseValue.rawValue);
+            }
+            else{
+                  argValues.push(true);
+                  argValues.push(false);   
+                  argRawValues.push(trueValue);
+                  argRawValues.push(falseValue);                     
+            }
       }
+      else{
+                  
+            for (let arg of functionTree.args) {
+                  if (arg.type == "Function") {
+                        arg.rawValue = await ResolveFunctions(arg, context, depth++);
+                        arg.value = arg.rawValue.value;
+                  }
+
+                  argValues.push(arg.value);
+                  argRawValues.push(arg.rawValue);
+            }
+      }
+
       functionTree.args = argValues;
+      functionTree.argsRaw = argRawValues;
       //console.log(`Resolving Function:`, functionTree.method);
       const result = await functionRunner(operations[functionTree.method.toLowerCase()],argValues, context);
+      functionTree.value = result;
 
       if (functionTree.properties) {
             let propertyValues = [];
+            let propertyRawValues = [];
       
             for(let property of functionTree.properties) {
                   if(typeof property == "object"){
                         if(property.type == "Function" && availableFunctions().filter((f) => `${f}`.toLowerCase() == `${property.method}`.toLowerCase()).length > 0){
                               let result = await ResolveFunctions(property, context, depth++);
-                              propertyValues.push(result);      
+                              propertyValues.push(result.value);      
+                              propertyRawValues.push(result);
                               continue;                  
+                        }
+                        else if(property.type == "Function" && !IsFunction(property.method)){
+                              propertyValues.push(property.method)
+                              propertyRawValues.push(property.method)
+                              continue;
                         }
                   }
       
                   propertyValues.push(property);
+                  propertyRawValues.push(property);
             };
 
             functionTree.properties = propertyValues;
+            functionTree.propertiesRawValues = propertyRawValues;
 
-            return getPropertyFromObject(result, functionTree.properties);
+            functionTree.value = getPropertyFromObject(result, functionTree.properties);
       }
 
-      return result;
+      return functionTree;
 }
 
 
@@ -298,7 +358,9 @@ const empty = (args) => {
       else if (typeof itemToTest === 'string') {
             return itemToTest === '';
       }
-      else {
+      else if (!itemToTest){
+            return true;
+      } else {
             throw new Error(`Unsupported type for function 'empty'. Expected array, object, or string.`);
       }
 }
@@ -353,6 +415,9 @@ const first = (args) => {
 
       const value = args[0];
 
+      if(!value)
+            return null;
+
       if (typeof value === 'string') {
             return value.charAt(0);
       }
@@ -405,13 +470,19 @@ const last = (args) => {
             throw new Error("Invalid arguments provided to 'last' function");
       }
       const inputValue = args[0];
+
+      
+      if(!inputValue)
+            return null;
+
       if (typeof inputValue === 'string') {
             return inputValue.charAt(inputValue.length - 1);
       } else if (Array.isArray(inputValue)) {
             return inputValue[inputValue.length - 1];
-      } else {
-            throw new Error("Invalid type provided to 'last' function. Expected string or array.");
-      }
+      } 
+      
+      throw new Error("Invalid type provided to 'last' function. Expected string or array.");
+      
 }
 
 const length = (args) => {
@@ -926,7 +997,7 @@ const indexof = (args) => {
                   }
             }
       } else if (typeof searchContainer === "string" && typeof itemToFind === "string") {
-            return searchContainer.toLowerCase().indexof(itemToFind.toLowerCase());
+            return searchContainer.toLowerCase().indexOf(itemToFind.toLowerCase());
       } else {
             throw new Error("Invalid argument types provided");
       }
@@ -952,7 +1023,7 @@ const lastindexof = (args) => {
                   }
             }
       } else if (typeof searchContainer === "string" && typeof itemToFind === "string") {
-            return searchContainer.toLowerCase().lastindexof(itemToFind.toLowerCase());
+            return searchContainer.toLowerCase().lastIndexOf(itemToFind.toLowerCase());
       } else {
             throw new Error("Invalid argument types provided");
       }
@@ -1029,6 +1100,10 @@ const field = async (args, context, pathOnly = false) => {
             throw new Error(`Expected resource in the context for function 'field'`);
       }
 
+      if(context.fieldOverride && context.fieldOverride[args[0].toLowerCase()]){
+            return context.fieldOverride[args[0].toLowerCase()];
+      }
+
       if (!inMemory.aliases) {
             if (fs.existsSync('./aliases.json'))
                   inMemory.aliases = JSON.parse(fs.readFileSync('./aliases.json', 'utf-8'))
@@ -1053,6 +1128,15 @@ const field = async (args, context, pathOnly = false) => {
             return getPropertyFromObject(context.resource, ['tags',tagName]);
       }
 
+      Object.keys(context.applicable).forEach((applicableField) => {
+            if(args[0].toLowerCase() == applicableField){
+                  context.applicability[applicableField] = true;
+                  if(context.applicable[applicableField] != true){
+                        context.applicable[applicableField] = context.currentConditionHash;
+                  }
+            }
+      });
+
       if (pathOnly)
             return path;
 
@@ -1074,7 +1158,7 @@ const field = async (args, context, pathOnly = false) => {
                               let items = getPropertyFromObject(baseContext, [path.substring(0, path.length - 3)]);
                               //console.log(`Running field function:`,JSON.stringify(baseContext), JSON.stringify(items));
                               if(!items){
-                                    return [];
+                                    return null;
                               }
 
                               for (let item of items) {
@@ -1086,17 +1170,22 @@ const field = async (args, context, pathOnly = false) => {
                         }
                   }
 
-                  return results.length == 0 ? baseContext : results;
+                  if(results.length == 0 && baseContext){
+                        return baseContext;
+                  }
+
+                  return results;
             }
             let currentValue = expandArray(context.resource, propertyPaths);
-
-            if(args[0].toLowerCase() == 'fullname'){
-                  currentValue = extractFullName(currentValue);
-            }
 
             return currentValue;
       }
       else {
+            
+            if(args[0].toLowerCase() == 'fullname'){
+                  return extractFullName(context.resource.id);
+            }
+
             return getPropertyFromObject(context.resource, propertyPaths);
       }
 }

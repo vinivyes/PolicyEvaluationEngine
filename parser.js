@@ -97,8 +97,10 @@ const ParseFunction = (f) => {
                   propertyAccessorStart--;
                   currentArgument += f[c];
                   depth0f += f[c];
-                  functionTree.args.push(currentArgument);
-                  currentArgument = '';
+                  if(depth <= 1){
+                        functionTree.args.push(currentArgument);
+                        currentArgument = '';
+                  }
                   continue;
             }
 
@@ -185,7 +187,13 @@ const ParseArgument = (arg) => {
             else {
                   let isPropertyFunction = `${arg}`.startsWith(`[`) && `${arg}`.endsWith(`]`)
                   let _propertyFunction = `${arg}`.substring(1,`${arg}`.length-1);
-                  argType = isPropertyFunction ? `property` : typeof (JSON.parse(arg));
+                  let argType = `unknown`;
+                  try{
+                        argType = isPropertyFunction ? `property` : typeof (JSON.parse(arg));
+                  }
+                  catch(err){
+                        console.error(err)
+                  }
                   argumentTree = {
                         type: argType,
                         method: null,

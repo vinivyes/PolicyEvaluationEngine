@@ -1,13 +1,34 @@
+const { getResourceById } = require('./azureApi');
 const { IsFunction, ResolveFunctions, field, endswith } = require('./functions');
 const { ParseFunction } = require('./parser');
+const crypto = require("crypto");
 
-const ResolveCondition = async (c, context, depth = 0) => {
+const makeid = () => { return crypto.randomBytes(16).toString("hex"); }
+
+const ResolveCondition = async (c, context, depth = 0, path) => {
       //console.log(`Resolving with Depth: ${depth}`)
-      
+
       let condition = {
             rawCondition: c,
             rawOperation: {},
             result: null
+      }
+
+      if (depth == 0) {
+            context.applicability = {
+                  type: false,
+                  name: false,
+                  kind: false
+            };
+            context.applicable = {
+                  type: false,
+                  name: false,
+                  kind: false
+            };
+      }
+
+      if (path && context.countDepthMap) {
+            condition.path = replaceAsterisksWithNumbers(path, context.countDepthMap)
       }
 
       let keys = Object.keys(c);
@@ -33,32 +54,43 @@ const ResolveCondition = async (c, context, depth = 0) => {
 
             let arg0 = c[valueKey];
             let arg1 = c[operationKey];
+            let rawArg0 = c[valueKey];
+            let rawArg1 = c[operationKey];
             let isFunction0 = `${arg0}`[0] == "[" && `${arg0}`[`${arg0}`.length - 1] == "]";
             let isFunction1 = `${arg1}`[0] == "[" && `${arg1}`[`${arg1}`.length - 1] == "]";
 
+            let resultHash = makeid();
+            context.currentConditionHash = resultHash;
 
             if (valueKey != "count" && isFunction0 && IsFunction(`${arg0}`.substring(1, `${arg0}`.length - 1))) {
-                  arg0 = await ResolveFunctions(
+                  rawArg0 = await ResolveFunctions(
                         ParseFunction(`${arg0}`.substring(1, `${arg0}`.length - 1)),
                         context
                   );
+                  arg0 = rawArg0.value;
             }
 
             if (isFunction1 && IsFunction(`${arg1}`.substring(1, `${arg1}`.length - 1))) {
-                  arg1 = await ResolveFunctions(
+                  rawArg1 = await ResolveFunctions(
                         ParseFunction(`${arg1}`.substring(1, `${arg1}`.length - 1)),
                         context
                   );
+                  arg1 = rawArg1.value;
             }
 
             if (valueKey == "field") {
-                  arg0 = await ResolveFunctions(
+                  rawArg0 = await ResolveFunctions(
                         ParseFunction(`field('${arg0}')`),
                         context
                   );
+                  arg0 = rawArg0.value;
             }
 
             if (valueKey == "count") {
+                  if (!context.countStart) {
+                        context.countStart = depth;
+                  }
+
                   arg0 = await count(c["count"], context, depth);
                   condition.rawOperation["_count"] = arg0;
                   arg0 = arg0.result;
@@ -75,30 +107,167 @@ const ResolveCondition = async (c, context, depth = 0) => {
             condition.rawOperation["_opKey"] = operationKey;
 
             condition.rawOperation["_value"] = arg0;
+            condition.rawOperation["_RawValue"] = rawArg0;
             condition.rawOperation["_op"] = arg1;
+            condition.rawOperation["_RawOp"] = rawArg1;
 
             condition.result = await conditionRunner(operations[operationKey.toLowerCase()], [arg0, arg1], context, depth);
 
 
-            if (depth == 0) {
+            ['type', 'name', 'kind'].forEach((applicableField) => {
+                  if (context.applicability[applicableField] && context.applicable[applicableField] == resultHash && condition.result == true) {
+                        context.applicable[applicableField] = true;
+                  }
+            });
+
+
+            if (context.countStart && depth == context.countStart) {
                   context.countDepthMap = null;
                   context.countContext = null;
+                  context.countStart = null;
             }
       }
       else {
             throw new Error('Unrecognized condition');
       }
 
-      switch(context.effect){
-            case "audit":
-            case "deny":
-            case "modify":
-            case "append":
-                  condition.complianceState = (condition.result ? 'NonCompliant' : 'Compliant')
-                  break;
+      if (depth == 0) {
+            Object.keys(context.applicable).forEach((applicableField) => {
+                  if (context.applicable[applicableField] != true) {
+                        context.applicable[applicableField] = false;
+                  }
+            });
+
+            condition.applicable = Object.keys(context.applicable).filter((applicableField) => {
+                  return context.applicability[applicableField] == context.applicable[applicableField] || context.applicability[applicableField] == false
+            }).length == Object.keys(context.applicable).length;
+
+            let overrides = {
+                  id: await field(['id'],context),
+                  name: await field(['name'],context),
+                  location: await field(['location'],context),
+                  type: await field(['type'],context),
+                  kind: await field(['kind'],context),
+                  tags: await field(['tags'],context),
+                  identity: await field(['identity'],context)
+            }
+
+            context.fieldOverride = overrides;
+            
+            switch (context.effect) {
+                  case "audit":
+                  case "deny":
+                  case "modify":
+                  case "append":
+                        condition.complianceState = condition.applicable ? (condition.result ? 'NonCompliant' : 'Compliant') : 'NotApplicable'
+                        break;
+                  case "deployifnotexists":
+                  case "auditifnotexists":
+                        condition.ifnotexists = condition.applicable ? await IfNotExists(context) : false;
+                        condition.complianceState = condition.ifnotexists.result ? 'Compliant' : 'NonCompliant'
+
+            }
       }
+
+
       return condition;
 }
+
+const IfNotExists = async (context) => {
+      let resourceId = context.id;
+      let scanType = context.policyRule.then.details.type;
+      let scanName = context.policyRule.then.details.name;
+      let scanRG = context.policyRule.then.details.resourceGroupName;
+      let scope = context.policyRule.then.details.existenceScope ? context.policyRule.then.details.existenceScope : 'ResourceGroup';
+      let isFunctionScanRG = scanRG ? `${scanRG}`[0] == "[" && `${scanRG}`[`${scanRG}`.length - 1] == "]" : false;
+      let isFunctionScanName = `${scanName}`[0] == "[" && `${scanName}`[`${scanName}`.length - 1] == "]";
+      if (isFunctionScanName) {
+            scanName = (await ResolveFunctions(
+                  ParseFunction(`${scanName}`.substring(1, `${scanName}`.length - 1)),
+                  context
+            )).value;
+      }
+      if (isFunctionScanRG) {
+            scanRG = (await ResolveFunctions(
+                  ParseFunction(`${scanRG}`.substring(1, `${scanRG}`.length - 1)),
+                  context
+            )).value;
+      }
+
+      let resourceScanId = null;
+
+      if (`${scope}`.toLowerCase() == 'resourcegroup') {
+            resourceScanId = `${scanType}`.toLowerCase() == `${context.resource.type}`.toLowerCase()  ?
+                  `${resourceId.split('/providers/')[0]}/providers/` + `${scanName ? `${buildResourceNameType(scanType, scanName)}` : scanType}` :
+                  `${scanType}`.toLowerCase().startsWith(context.resource.type.toLowerCase()) ?
+                        `${resourceId}/${scanType.split('/').pop()}` + `${scanName ? `/${scanName.split('/').pop()}` : ''}` :
+                        scanRG ?
+                              (`${resourceId}`.split('/providers/')[0] + `/providers/${buildResourceNameType(scanType, scanName)}`) :
+                              `${resourceId}/providers/${buildResourceNameType(scanType, scanName)}`
+
+            if (scanRG) {
+                  let segments = resourceScanId.split('/');
+                  segments[4] = scanRG;
+                  resourceScanId = segments.join('/');
+            }
+      }
+      else {
+            let segments = resourceId.split('/').slice(0,3);
+            resourceScanId = `${segments.join('/')}/providers/${scanType}` + `${scanName ? `/${scanName}` : ''}`;
+      }
+
+      let existentResources = await getResourceById(resourceScanId);
+      
+      if(!existentResources || !existentResources.resource){
+            existentResources = [];
+      }
+      else if(existentResources.resource.value && Array.isArray(existentResources.resource.value)){
+            existentResources = existentResources.resource.value;
+      }
+      else{
+            existentResources = [existentResources.resource];
+      }
+
+      let isCompliant = false;
+      let resourceEvaluation = [];
+
+      for(let r of existentResources){
+            if(isCompliant)
+                  continue;
+
+            let tempContext = JSON.parse(JSON.stringify(context));
+            tempContext.effect = 'audit';
+            tempContext.resource = r;
+
+            let res = await ResolveCondition(context.policyRule.then.details.existenceCondition, tempContext);
+            resourceEvaluation.push({
+                  evaluation:res,
+                  resource:r
+            });
+
+            isCompliant = res.result;
+      }
+
+      return {
+            result:isCompliant,
+            rawEvaluation: resourceEvaluation
+      }
+}
+
+function buildResourceNameType (type, name){
+
+      let segmentsTypes = type.split('/').slice(1);
+      let segmentNames = name.split('/');
+
+      let result = type.split('/')[0];
+
+      for(let s = 0; s < segmentsTypes.length; s++){
+            result += `/${segmentsTypes[s]}/${segmentNames[s]}`;
+      }
+
+      return result
+}
+
 
 // Dynamic function handler
 async function conditionRunner(func, args, context, depth) {
@@ -174,7 +343,7 @@ const count = async (c, context, depth = 0) => {
 
                   for (let r = 0; r < maxCount; r++) {
                         context.countDepthMap[context.countDepthMap.length - 1] = r;
-                        let result = await ResolveCondition(c["where"], context, depth + 1);
+                        let result = await ResolveCondition(c["where"], context, depth + 1, path);
                         //console.log(`copy index ${r}`,result);
                         results.push(result);
                   }
@@ -191,10 +360,10 @@ const count = async (c, context, depth = 0) => {
             let arg0 = c[valueKey];
             let isFunction0 = `${arg0}`[0] == "[" && `${arg0}`[`${arg0}`.length - 1] == "]";
 
-            context.countContext[`${c["name"] ? c["name"] : 'global'}`] = isFunction0 ? await ResolveFunctions(
+            context.countContext[`${c["name"] ? c["name"] : 'global'}`] = isFunction0 ? (await ResolveFunctions(
                   ParseFunction(`${arg0}`.substring(1, `${arg0}`.length - 1)),
                   context
-            ) : arg0
+            )).value : arg0
 
             let array = context.countContext[`${c["name"] ? c["name"] : 'global'}`];
 
@@ -252,7 +421,7 @@ const allof = async (c, context, depth = 0) => {
       let results = [];
 
       for (let node of c[allOfKey]) {
-            let resolution = await ResolveCondition(node, context, depth);
+            let resolution = await ResolveCondition(node, context, depth + 1);
             results.push(resolution);
             if (!resolution.result)
                   break;
@@ -277,7 +446,7 @@ const anyof = async (c, context, depth = 0) => {
 
 
       for (let node of c[anyOfKey]) {
-            let resolution = results.push(await ResolveCondition(node, context, depth))
+            let resolution = results.push(await ResolveCondition(node, context, depth + 1))
             if (resolution.result)
                   break;
       }
@@ -294,7 +463,7 @@ const not = async (c, context, depth = 0) => {
             result: null
       }
 
-      let resolve = await ResolveCondition(c['not'], context, depth);
+      let resolve = await ResolveCondition(c['not'], context, depth + 1);
       condition.rawResult = resolve;
       condition.result = !resolve.result
       //console.log(JSON.stringify(resolve), !resolve.result)
@@ -364,7 +533,7 @@ const contains = (args) => {
       }
 
       let [arg0, arg1] = args;
-      
+
       arg0 = typeof arg0 != "undefined" ? arg0 : '';
       arg1 = typeof arg1 != "undefined" ? arg1 : '';
 

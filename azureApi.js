@@ -11,10 +11,41 @@ function sortApiVersions(versions) {
             //} else if (!a.includes('-preview') && b.includes('-preview')) {
             //      return -1;  // a comes before b if a is not preview but b is.
             //} else {
-                  return b.localeCompare(a);  // Otherwise, sort them lexicographically in descending order.
+            return b.localeCompare(a);  // Otherwise, sort them lexicographically in descending order.
             //}
       });
 }
+// Create an instance of Axios
+const api = axios.create({
+      timeout: 30000
+});
+
+// Axios interceptor for handling 401 responses and retrying
+api.interceptors.response.use(
+      (response) => {
+            // If the response is successful, return it as-is
+            return response;
+      },
+      async (error) => {
+            if (error.response && error.response.status === 401) {
+                  // 401 status code indicates the need for reauthentication
+                  try {
+                        // Perform reauthentication (e.g., refresh token)
+                        await LoginWithAzCLI();
+
+                        // Retry the original request with the updated credentials
+                        const originalRequest = error.config;
+                        return api(originalRequest);
+                  } catch (reauthError) {
+                        // If reauthentication fails, you can handle it here
+                        console.error('Reauthentication failed:', reauthError);
+                        throw reauthError;
+                  }
+            }
+            // For other errors, simply rethrow the error
+            throw error;
+      }
+);
 
 async function getLatestApiVersion(id, provider) {
       if (provider && apiVersions[provider]) {
@@ -26,7 +57,7 @@ async function getLatestApiVersion(id, provider) {
             'Authorization': `Bearer ${authToken.token}`
       };
       try {
-            const response = await axios.get(endpoint, { headers });
+            const response = await api.get(endpoint, { headers });
             const apiVersions = response.data.resourceTypes[0].apiVersions;
             return apiVersions[0];
       } catch (error) {
@@ -47,7 +78,7 @@ async function getLatestApiVersion(id, provider) {
                   console.error('Error getting API version:', error.response.data);
             }
             else {
-                  console.log(`Could not retrieve API Version`, JSON.stringify(error))
+                  console.log(`Could not retrieve API Version: (${error.response.status})`)
             }
       }
 }
@@ -69,14 +100,14 @@ const resources = {
 }
 
 async function getResourceById(resourceId, forceApiVersion) {
-      if(resources[resourceId])
+      if (resources[resourceId])
             return resources[resourceId];
 
       let provider = null;
-      if(`${resourceId}`.toLowerCase().includes('/providers/')){
+      if (`${resourceId}`.toLowerCase().includes('/providers/')) {
             provider = extractProviderFromResourceId(resourceId);
       }
-      
+
       const apiVersion = forceApiVersion ? forceApiVersion : await getLatestApiVersion(resourceId, provider);
       const endpoint = `https://management.azure.com${resourceId}?api-version=${apiVersion}`;
 
@@ -89,7 +120,7 @@ async function getResourceById(resourceId, forceApiVersion) {
       };
 
       try {
-            const response = await axios.get(endpoint, { headers });
+            const response = await api.get(endpoint, { headers });
             let value = {
                   apiVersion: apiVersion,
                   resource: response.data
@@ -104,9 +135,10 @@ async function getResourceById(resourceId, forceApiVersion) {
             else if (error.response.status != 403) {
                   console.error('Resource cannot be read (403):', resourceId);
             }
-            else{
+            else {
                   console.error('Error getting resource:', JSON.stringify(error.response));
             }
+            
       }
 }
 
@@ -129,7 +161,7 @@ async function runResourceGraphQuery(query) {
       };
 
       try {
-            const response = await axios.post(endpoint, requestBody, { headers: headers });
+            const response = await api.post(endpoint, requestBody, { headers: headers });
             return response.data;
       } catch (error) {
             console.error('Error running query:', error.response);
@@ -307,7 +339,6 @@ const RetrieveTestPolicies = async () => {
       let argQuery = `
       policyresources
       | where type == "microsoft.policyinsights/policystates"
-      | where properties.policyDefinitionAction in~ ("Audit", "Deny", "Modify", "Append")
       | summarize by policyAssignmentId=tostring(properties.policyAssignmentId), policyDefinitionId=tostring(properties.policyDefinitionId), policyDefinitionRefId=tostring(properties.policyDefinitionReferenceId)
       `
 
@@ -351,7 +382,7 @@ const RetrieveAliases = async () => {
             'Authorization': `Bearer ${authToken.token}`
       };
       try {
-            const response = await axios.get(endpoint, { headers });
+            const response = await api.get(endpoint, { headers });
             let aliases = [
                   { "name": "id", "defaultPath": "id" },
                   { "name": "location", "defaultPath": "location" },
@@ -390,4 +421,4 @@ const RetrieveAliases = async () => {
       }
 }
 
-module.exports = { LoginWithAzCLI, RetrievePolicy, runResourceGraphQuery, getResourceById,  RetrieveAliases, RetrieveTestCompliance, RetrieveTestPolicies }
+module.exports = { LoginWithAzCLI, RetrievePolicy, runResourceGraphQuery, getResourceById, RetrieveAliases, RetrieveTestCompliance, RetrieveTestPolicies }

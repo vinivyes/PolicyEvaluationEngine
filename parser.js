@@ -6,7 +6,8 @@ const ParseFunction = (f) => {
             type: 'Function',
             method: '',
             args: [],
-            value: null
+            value: null,
+            original:f
       }
 
       let loadedMethod = false;

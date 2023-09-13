@@ -3,7 +3,8 @@ const {
 } = require('./parser');
 
 const {
-      ResolveCondition
+      ResolveCondition,
+      getPropertyFromObject
 } = require('./conditions');
 
 const {
@@ -29,8 +30,10 @@ const GetCompliance = async (policyData, resourceId) => {
             idSegments = idSegments.slice(0, idSegments.length - ((resource.resource.type.split('/').length - 2) * 2))
             let parentId = idSegments.join("/");
             let parentResource = await getResourceById(parentId);
-            if (parentResource && parentResource.resource)
-                  resource.resource.location = parentResource.resource.location;
+            if (parentResource && parentResource.resource){
+                  resource.resource.location = parentResource.resource.location;                  
+                  resource.resource.tags = parentResource.resource.tags;
+            }
       }
 
       let context = {
@@ -56,12 +59,139 @@ const GetCompliance = async (policyData, resourceId) => {
       }
 
       context.effect = `${effect}`.toLowerCase();
+      let result = await ResolveCondition(policyData.PolicyRule.if, context);
+      let policyResolution = {};
+      const addToPolicyResolution = (result) => {
+            let newPr = {};
+            if(result.rawOperation){
+                  newPr = result.rawOperation;
+                  if(newPr.FieldKey == "count"){
+                        newPr["context"] = newPr.FieldValueRaw.context;
+                  }
+                  if(newPr.OperationValueRaw){
+                        newPr.OperationValueRaw = addToPolicyResolution(newPr.OperationValueRaw);
+                  }
+                  if(newPr.FieldValueRaw){
+                        newPr.FieldValueRaw = addToPolicyResolution(newPr.FieldValueRaw);
+                  }
+            }
+            else if(result.rawResults){
+                  let rawResults = [];
+                  for(let r = 0; r < result.rawResults.length; r++){
+                        let rr = result.rawResults[r];
 
+                        rawResults.push(addToPolicyResolution(rr));
+                  }
+                  return rawResults;
+            }
+            else if(result.rawResult){
+                  return addToPolicyResolution(result.rawResult);
+            }
+            return Object.keys(newPr).length == 0 ? result : newPr;
+      }
+      
+      policyResolution = addToPolicyResolution(result);
+
+      let inlinePolicyResolution = {};
+      let inlinePolicyResolutionNoFunctions = {};
+      const addToInlinePolicyResolution = (pr, noFunctions = false) => {
+            let newPr = {};
+            if(pr.context){
+                  newPr["context"] = pr.context;
+            }
+            if(pr.OperationKey){
+                  newPr[pr.OperationKey] = noFunctions && pr.OperationKey != "not" ? pr.OperationValue : addToInlinePolicyResolution(pr.OperationValueRaw, noFunctions);
+                  if(pr.OperationValueRaw != pr.OperationValue && typeof pr.OperationValueRaw == "object" && pr.OperationValueRaw.original){
+                        newPr[`${pr.OperationKey}Expression`] = pr.OperationValueRaw.original;
+                  }
+                  if(pr.OperationValueRaw && pr.FieldKey && pr.OperationValueRaw != pr.OperationValue && !noFunctions){
+                        newPr[`${pr.OperationKey}_result`] = pr.OperationValue;
+                  }
+                  if(Array.isArray(pr.OperationValueRaw)){
+                        let newValue = []
+                        for(let operation of pr.OperationValueRaw){
+                              newValue.push(addToInlinePolicyResolution(operation, noFunctions));
+                        }
+                        newPr[pr.OperationKey] = newValue;
+                  }
+            }
+            if(pr.FieldKey){
+
+                  newPr[pr.FieldKey] = noFunctions ? pr.FieldValue : addToInlinePolicyResolution(pr.FieldValueRaw, noFunctions);
+                  if(pr.FieldValueRaw != pr.FieldValue && typeof pr.FieldValueRaw == "object" && pr.FieldValueRaw.original){
+                        newPr[`${pr.FieldKey}Expression`] = pr.FieldValueRaw.original;
+                  }
+                  if(pr.FieldValueRaw && pr.FieldValueRaw != pr.FieldValue && !noFunctions){
+                        newPr[`${pr.FieldKey}_result`] = pr.FieldValue;
+                  }
+                  if(Array.isArray(pr.FieldValueRaw)){
+                        let newValue = []
+                        for(let operation of pr.FieldValueRaw){
+                              newValue.push(addToInlinePolicyResolution(operation, noFunctions));
+                        }
+                        newPr[pr.FieldKey] = newValue;
+                  }
+            }
+            else if(typeof pr.OperationValue != "undefined"){
+                  newPr["result"] = pr.OperationValue;
+            }
+
+            if(typeof getPropertyFromObject(pr,'path') != "undefined"){
+                  newPr["path"] = getPropertyFromObject(pr,'path');
+            }
+
+            if(typeof getPropertyFromObject(pr,'result') != "undefined"){
+                  newPr["result"] = getPropertyFromObject(pr,'result');
+            }
+
+            return Object.keys(newPr).length == 0 ? pr : newPr;
+      }
+      
+      inlinePolicyResolution = addToInlinePolicyResolution(policyResolution);
+      inlinePolicyResolutionNoFunctions = addToInlinePolicyResolution(policyResolution,true);
+      
       return {
-            result: await ResolveCondition(policyData.PolicyRule.if, context),
-            context: context
+            result: result,
+            context: context,
+            policyResolution: policyResolution,
+            inlinePolicyResolution: inlinePolicyResolution,
+            inlinePolicyResolutionNoFunctions: inlinePolicyResolutionNoFunctions
       }
 }
+
+const TestCompliance = async (policyAssignmentId, resourceId, policyDefinitionId, policyDefinitionRefId) => {
+      await LoginWithAzCLI();
+
+      try {
+            
+            let policyData = await RetrievePolicy(policyAssignmentId, policyDefinitionId, policyDefinitionRefId);
+            for (let test of resourceId ? [{ resourceId: resourceId }] : testCompliance) {
+
+                  let compliance = await GetCompliance(policyData, test.resourceId);
+
+                  console.log(JSON.stringify(compliance.inlinePolicyResolutionNoFunctions))
+
+                  if (!test.complianceState) {
+                        console.log(`Test Result, Resource is: ${compliance.result.complianceState}`)
+                  }
+                  else if (`${test.complianceState}`.toLowerCase() != `${compliance.complianceState}`.toLowerCase()) {
+                        console.log(`[FAILED] Resource ID: ${test.resourceId} - Policy Assignmnet ID: ${policyAssignmentId} - Policy Definition ID: ${policyDefinitionId} `)
+                  }
+                  else {
+                        console.log(`Test Result: ${test.complianceState == compliance.complianceState}`, test.resourceId)
+                  }
+            }
+      }
+      catch (err) {
+            if (!`${err}`.startsWith('Error: Could not find Policy Assignment'))
+                  console.log(`[ERROR]`, err, `Policy Assignmnet ID: ${policyAssignmentId} - Policy Definition ID: ${policyDefinitionId} `)
+      }
+
+}
+
+TestCompliance('/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/providers/Microsoft.Authorization/policyAssignments/625bf25501584b0bbbb5eaf6','/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/resourcegroups/sr5028/providers/microsoft.storage/storageaccounts/sr502899fb')
+//TestCompliance('/subscriptions/414a181f-779c-4fe6-a79b-550c73428208/providers/microsoft.authorization/policyassignments/a034e648e96e412a8ffbfa86','/subscriptions/414a181f-779c-4fe6-a79b-550c73428208/resourcegroups/armsyncdemo/providers/microsoft.compute/virtualmachines/vm-a','/subscriptions/414a181f-779c-4fe6-a79b-550c73428208/providers/microsoft.authorization/policydefinitions/a741ac2f-3f5b-4dc0-94cf-d41ea44ad624')
+
 const MAX_CONCURRENCY = 6; // Maximum number of parallel evaluations
 
 const main = async () => {
@@ -95,7 +225,6 @@ const main = async () => {
       const evaluationPromises = [];
 
       for (let test of testCompliance.slice(0, 20)) {
-        currentResourceId = test.resourceId;
 
         if (new Date().getTime() - lastLogin.getTime() > 6 * 60 * 1000) {
           await LoginWithAzCLI(false);
@@ -105,6 +234,8 @@ const main = async () => {
 
         evaluationPromises.push(
           (async () => {
+            let cResourceId = test.resourceId;
+
             let compliance = await GetCompliance(policyData, test.resourceId);
 
             if (!compliance) {
@@ -115,8 +246,8 @@ const main = async () => {
               `${test.complianceState}`.toLowerCase() !== `${compliance.result.complianceState}`.toLowerCase()
             ) {
               console.log(
-                `[FAILED] Resource ID: ${test.resourceId} - Policy Assignment ID: ${policyAssignment.policyAssignmentId} - Policy Definition ID: ${policyAssignment.policyDefinitionId} - Resource ID: ${currentResourceId}`,
-                `TestCompliance('${policyAssignment.policyAssignmentId}','${currentResourceId}','${policyAssignment.policyDefinitionId}')`
+                `[FAILED] Resource ID: ${test.resourceId} - Policy Assignment ID: ${policyAssignment.policyAssignmentId} - Policy Definition ID: ${policyAssignment.policyDefinitionId} - Resource ID: ${cResourceId}`,
+                `TestCompliance('${policyAssignment.policyAssignmentId}','${cResourceId}','${policyAssignment.policyDefinitionId}')`
               );
               failed = true;
               failRes++;
@@ -174,37 +305,5 @@ const main = async () => {
 };
 
 
-const TestCompliance = async (policyAssignmentId, resourceId, policyDefinitionId, policyDefinitionRefId) => {
-      await LoginWithAzCLI();
-
-      try {
-            //let testCompliance = await RetrieveTestCompliance(policyAssignmentId, policyDefinitionId, policyDefinitionRefId);
-            let policyData = await RetrievePolicy(policyAssignmentId, policyDefinitionId, policyDefinitionRefId);
-            for (let test of resourceId ? [{ resourceId: resourceId }] : testCompliance) {
-
-                  let compliance = await GetCompliance(policyData, test.resourceId);
-
-                  if (!test.complianceState) {
-                        console.log(`Test Result, Resource is: ${compliance.result.complianceState}`)
-                  }
-                  else if (`${test.complianceState}`.toLowerCase() != `${compliance.complianceState}`.toLowerCase()) {
-                        console.log(`[FAILED] Resource ID: ${test.resourceId} - Policy Assignmnet ID: ${policyAssignmentId} - Policy Definition ID: ${policyDefinitionId} `)
-                  }
-                  else {
-                        console.log(`Test Result: ${test.complianceState == compliance.complianceState}`, test.resourceId)
-                  }
-            }
-      }
-      catch (err) {
-            if (!`${err}`.startsWith('Error: Could not find Policy Assignment'))
-                  console.log(`[ERROR]`, err, `Policy Assignmnet ID: ${policyAssignmentId} - Policy Definition ID: ${policyDefinitionId} `)
-      }
-
-}
-
-//TestCompliance(`/subscriptions/af15e575-f948-49ac-bce0-252d028e9379/providers/Microsoft.Authorization/policyAssignments/Defender for Containers provisioning Azure Policy Addon for Kub`,`/subscriptions/af15e575-f948-49ac-bce0-252d028e9379/resourcegroups/hdi-5f0843d98ced4627bc887881350ca1a7/providers/microsoft.containerservice/managedclusters/espark1-pool`)
 //main();
-
-//TestCompliance('/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/providers/microsoft.authorization/policyassignments/17fe2bf902f84d3cb25e77ed','/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/resourcegroups/sr2435/providers/microsoft.eventhub/namespaces/sr2435-p-pff/networkrulesets/default','/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/providers/microsoft.authorization/policydefinitions/d14f2fbe-61be-4c85-b929-d23fc107041f')
-//TestCompliance('/providers/microsoft.management/managementgroups/48fed3a1-0814-4847-88ce-b766155f2792/providers/microsoft.authorization/policyassignments/b65cf29bbd4b57d','/subscriptions/af15e575-f948-49ac-bce0-252d028e9379/resourcegroups/krishrg5/providers/microsoft.network/networksecuritygroups/basicnsgkrishvmss08-vnet-nic01','/providers/microsoft.management/managementgroups/48fed3a1-0814-4847-88ce-b766155f2792/providers/microsoft.authorization/policydefinitions/e695de0794b757d')
-TestCompliance('/providers/microsoft.management/managementgroups/48fed3a1-0814-4847-88ce-b766155f2792/providers/microsoft.authorization/policyassignments/b65cf29bbd4b57d','/subscriptions/af15e575-f948-49ac-bce0-252d028e9379/resourcegroups/cmpreviewtest-centralus/providers/microsoft.network/networksecuritygroups/cmpreviewcentraleuap-nsg/securityrules/allow_all_outbound','/providers/microsoft.management/managementgroups/48fed3a1-0814-4847-88ce-b766155f2792/providers/microsoft.authorization/policydefinitions/e695de0794b757d')
+//TestCompliance('/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/providers/microsoft.authorization/policyassignments/e35806bd40b4488f8b462ef3','/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/resourcegroups/sr7232/providers/microsoft.network/networksecuritygroups/vnet7232-default-nsg-eastus','/subscriptions/6e6feb18-4fff-4ecf-8ca8-0dc0c7506558/providers/microsoft.authorization/policydefinitions/54630b03-621b-4eed-9f84-21ba8cb6d687')

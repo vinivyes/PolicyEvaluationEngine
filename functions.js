@@ -62,7 +62,7 @@ const ResolveFunctions = async (functionTree, context, depth = 0) => {
             let falseValue = functionTree.args[2];
 
             if (op.type == "Function") {
-                  op.rawValue = await ResolveFunctions(op, context, depth++);
+                  op.rawValue = JSON.parse(JSON.stringify(await ResolveFunctions(op, context, depth++)));
                   op.value = op.rawValue.value;
             }
 
@@ -71,7 +71,7 @@ const ResolveFunctions = async (functionTree, context, depth = 0) => {
 
             if(op.value == true){
                   if (trueValue.type == "Function") {
-                        trueValue.rawValue = await ResolveFunctions(trueValue, context, depth++);
+                        trueValue.rawValue = JSON.parse(JSON.stringify(await ResolveFunctions(trueValue, context, depth++)));
                         trueValue.value = trueValue.rawValue.value;
                   }
       
@@ -82,7 +82,7 @@ const ResolveFunctions = async (functionTree, context, depth = 0) => {
             }
             else if(op.value == false){
                   if (falseValue.type == "Function") {
-                        falseValue.rawValue = await ResolveFunctions(falseValue, context, depth++);
+                        falseValue.rawValue = JSON.parse(JSON.stringify(await ResolveFunctions(falseValue, context, depth++)));
                         falseValue.value = falseValue.rawValue.value;
                   }
       
@@ -101,13 +101,15 @@ const ResolveFunctions = async (functionTree, context, depth = 0) => {
       else{
                   
             for (let arg of functionTree.args) {
+                  let rawValue = arg.value;
+                  let value = arg.value;
                   if (arg.type == "Function") {
-                        arg.rawValue = await ResolveFunctions(arg, context, depth++);
-                        arg.value = arg.rawValue.value;
+                        rawValue = await ResolveFunctions(arg, context, depth++);
+                        value = rawValue.value;
                   }
 
-                  argValues.push(arg.value);
-                  argRawValues.push(arg.rawValue);
+                  argValues.push(value);
+                  argRawValues.push(rawValue);
             }
       }
 

@@ -14,6 +14,13 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
             result: null
       }
 
+      if (path && context.countDepthMap) {
+            condition.path = replaceAsterisksWithNumbers(path, context.countDepthMap)
+            context.path = path;
+      }
+      if(context.countDepthMap)
+            condition.rawOperation["Path"] = replaceAsterisksWithNumbers(context.path, context.countDepthMap)
+
       if (depth == 0) {
             context.applicability = {
                   type: false,
@@ -27,15 +34,15 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
             };
       }
 
-      if (path && context.countDepthMap) {
-            condition.path = replaceAsterisksWithNumbers(path, context.countDepthMap)
-      }
 
       let keys = Object.keys(c);
       //console.log(`Condition Keys:`, JSON.stringify(keys));
 
       if (keys.length == 1) {
             condition.rawResult = await conditionRunner(operations[keys[0].toLowerCase()], c, context, depth)
+            condition.rawOperation["OperationKey"] = keys[0];
+            condition.rawOperation["OperationValue"] = condition.rawResult.result;
+            condition.rawOperation["OperationValueRaw"] = condition.rawResult;
             condition.result = condition.rawResult.result;
       }
       else if (keys.length == 2) {
@@ -91,9 +98,8 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
                         context.countStart = depth;
                   }
 
-                  arg0 = await count(c["count"], context, depth);
-                  condition.rawOperation["_count"] = arg0;
-                  arg0 = arg0.result;
+                  rawArg0 = await count(c["count"], context, depth);
+                  arg0 = rawArg0.result;
             }
 
             //Reserved words
@@ -103,16 +109,19 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
                         break;
             }
 
-            condition.rawOperation["_valueKey"] = valueKey;
-            condition.rawOperation["_opKey"] = operationKey;
 
-            condition.rawOperation["_value"] = arg0;
-            condition.rawOperation["_RawValue"] = rawArg0;
-            condition.rawOperation["_op"] = arg1;
-            condition.rawOperation["_RawOp"] = rawArg1;
+
+            condition.rawOperation["FieldKey"] = valueKey;
+            condition.rawOperation["OperationKey"] = operationKey;
+
+            condition.rawOperation["FieldValue"] = arg0;
+            condition.rawOperation["FieldValueRaw"] = rawArg0;
+            condition.rawOperation["OperationValue"] = arg1;
+            condition.rawOperation["OperationValueRaw"] = rawArg1;
 
             condition.result = await conditionRunner(operations[operationKey.toLowerCase()], [arg0, arg1], context, depth);
 
+            condition.rawOperation["Result"] = condition.result;
 
             ['type', 'name', 'kind'].forEach((applicableField) => {
                   if (context.applicability[applicableField] && context.applicable[applicableField] == resultHash && condition.result == true) {
@@ -120,12 +129,6 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
                   }
             });
 
-
-            if (context.countStart && depth == context.countStart) {
-                  context.countDepthMap = null;
-                  context.countContext = null;
-                  context.countStart = null;
-            }
       }
       else {
             throw new Error('Unrecognized condition');
@@ -175,10 +178,10 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
 
 const IfNotExists = async (context) => {
       let resourceId = context.id;
-      let scanType = context.policyRule.then.details.type;
-      let scanName = context.policyRule.then.details.name;
-      let scanRG = context.policyRule.then.details.resourceGroupName;
-      let scope = context.policyRule.then.details.existenceScope ? context.policyRule.then.details.existenceScope : 'ResourceGroup';
+      let scanType = getPropertyFromObject(context,'policyRule.then.details.type');
+      let scanName = getPropertyFromObject(context,'policyRule.then.details.name')
+      let scanRG = getPropertyFromObject(context,'policyRule.then.details.resourceGroupName')
+      let scope = getPropertyFromObject(context,'policyRule.then.details.existenceScope') ? getPropertyFromObject(context,'policyRule.then.details.existenceScope') : 'ResourceGroup';
       let isFunctionScanRG = scanRG ? `${scanRG}`[0] == "[" && `${scanRG}`[`${scanRG}`.length - 1] == "]" : false;
       let isFunctionScanName = `${scanName}`[0] == "[" && `${scanName}`[`${scanName}`.length - 1] == "]";
       if (isFunctionScanName) {
@@ -197,9 +200,9 @@ const IfNotExists = async (context) => {
       let resourceScanId = null;
 
       if (`${scope}`.toLowerCase() == 'resourcegroup') {
-            resourceScanId = `${scanType}`.toLowerCase() == `${context.resource.type}`.toLowerCase()  ?
+            resourceScanId = `${scanType}`.toLowerCase() == `${getPropertyFromObject(context,'resource.type')}`.toLowerCase()  ?
                   `${resourceId.split('/providers/')[0]}/providers/` + `${scanName ? `${buildResourceNameType(scanType, scanName)}` : scanType}` :
-                  `${scanType}`.toLowerCase().startsWith(context.resource.type.toLowerCase()) ?
+                  `${scanType}`.toLowerCase().startsWith(getPropertyFromObject(context,'resource.type').toLowerCase()) ?
                         `${resourceId}/${scanType.split('/').pop()}` + `${scanName ? `/${scanName.split('/').pop()}` : ''}` :
                         scanRG ?
                               (`${resourceId}`.split('/providers/')[0] + `/providers/${buildResourceNameType(scanType, scanName)}`) :
@@ -239,7 +242,7 @@ const IfNotExists = async (context) => {
             tempContext.effect = 'audit';
             tempContext.resource = r;
 
-            let res = await ResolveCondition(context.policyRule.then.details.existenceCondition, tempContext);
+            let res = await ResolveCondition(getPropertyFromObject(context,'policyrule.then.details.existencecondition'), tempContext);
             resourceEvaluation.push({
                   evaluation:res,
                   resource:r
@@ -287,6 +290,10 @@ async function conditionRunner(func, args, context, depth) {
 }
 
 const getPropertyFromObject = (obj, properties) => {
+      if(!Array.isArray(properties)){
+            properties = `${properties}`.split('.');
+      }
+
       for (let prop of properties) {
             if (endswith([prop, '[*]'])) {
                   prop = prop.substring(0, prop.length - 3)
@@ -301,9 +308,9 @@ const getPropertyFromObject = (obj, properties) => {
                   if (Number.isInteger(Number(part))) {
                         // If part is a number, treat it as an array index
                         obj = obj[Number(part)];
-                  } else if (obj && obj.hasOwnProperty(part)) {
+                  } else if (obj && Object.keys(obj).find((p) => `${p}`.toLowerCase() == `${part}`.toLowerCase())) {
                         // Otherwise, treat it as an object key
-                        obj = obj[part];
+                        obj = obj[Object.keys(obj).find((p) => `${p}`.toLowerCase() == `${part}`.toLowerCase())];
                   } else {
                         return undefined;
                   }
@@ -315,8 +322,14 @@ const getPropertyFromObject = (obj, properties) => {
 const count = async (c, context, depth = 0) => {
       let condition = {
             rawCondition: c,
-            result: null
+            result: null,
+            context: null
       }
+
+      if(!context.countDepth)
+            context.countDepth = 0;
+
+      context.countDepth++;
 
       let keys = Object.keys(c);
       let valueKey = keys.find(k => {
@@ -330,11 +343,10 @@ const count = async (c, context, depth = 0) => {
             let path = await field([c["field"]], context, true);
             let loadPath = replaceAsterisksWithNumbers(path, context.countDepthMap)
             let array = getPropertyFromObject(context.resource, loadPath.split('.'));
-
             if (!context.countDepthMap) {
                   context.countDepthMap = [0]
             }
-            else if (context.countDepthMap.length < depth) {
+            else if (context.countDepthMap.length < context.countDepth) {
                   context.countDepthMap.push(0);
             }
 
@@ -342,13 +354,15 @@ const count = async (c, context, depth = 0) => {
                   let maxCount = array.length;
 
                   for (let r = 0; r < maxCount; r++) {
-                        context.countDepthMap[context.countDepthMap.length - 1] = r;
+                        context.countDepthMap[context.countDepth - 1] = r;
                         let result = await ResolveCondition(c["where"], context, depth + 1, path);
-                        //console.log(`copy index ${r}`,result);
                         results.push(result);
                   }
-                  context.countDepthMap[context.countDepthMap.length - 1] = 0;
+                  context.countDepthMap[context.countDepth - 1] = 0;
             }
+
+            condition.context = array;
+            context.countDepthMap.pop();
       }
 
 
@@ -378,6 +392,7 @@ const count = async (c, context, depth = 0) => {
                   let result = await ResolveCondition(c["where"], context, depth + 1);
                   results.push(result);
             }
+            condition.context = array;
             context.countContextIndex = null;
       }
 
@@ -387,6 +402,14 @@ const count = async (c, context, depth = 0) => {
 
       condition.result = results.filter(r => r.result).length;
       condition.rawResults = results;
+
+      context.countDepth--;
+
+      if(context.countDepth == 0){
+            context.countContext = null;
+            context.countDepthMap = null;
+            context.countStart = null;
+      }
 
       return condition;
 }
@@ -772,7 +795,26 @@ const notlike = (args) => {
 }
 
 const notequals = (args) => {
-      return !equals(args);
+      if (Array.isArray(args)) {
+            if (args.length != 2) {
+                  throw new Error(`Expected 2 arguments on function 'equals', got ${args.length}`);
+            }
+      }
+      else {
+            throw new Error(`Call this function using 'Array' type arguments`);
+      }
+
+      let [arg0, arg1] = args;
+
+      arg0 = typeof arg0 != "undefined" ? arg0 : '';
+      arg1 = typeof arg1 != "undefined" ? arg1 : '';
+
+      if (Array.isArray(arg0)) {
+            return arg0.length == 0 ? false : !arg0.some((a0) => String(a0).toLowerCase() == String(arg1).toLowerCase());
+      }
+      else {
+            return String(arg0).toLowerCase() != String(arg1).toLowerCase();
+      }
 }
 
 const notcontains = (args) => {
@@ -826,4 +868,4 @@ const operations = {
 
 
 
-module.exports = { ResolveCondition }
+module.exports = { ResolveCondition, getPropertyFromObject }

@@ -21,7 +21,7 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
       if(context.countDepthMap)
             condition.rawOperation["Path"] = replaceAsterisksWithNumbers(context.path, context.countDepthMap)
 
-      if (depth == 0) {
+            if (depth == 0) {
             context.applicability = {
                   type: false,
                   name: false,
@@ -109,8 +109,6 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
                         break;
             }
 
-
-
             condition.rawOperation["FieldKey"] = valueKey;
             condition.rawOperation["OperationKey"] = operationKey;
 
@@ -124,11 +122,12 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
             condition.rawOperation["Result"] = condition.result;
 
             ['type', 'name', 'kind'].forEach((applicableField) => {
-                  if (context.applicability[applicableField] && context.applicable[applicableField] == resultHash && condition.result == true) {
-                        context.applicable[applicableField] = true;
+                  if (context.applicability[applicableField] && context.applicable[applicableField] == resultHash) {
+                        context.applicable[applicableField] = context.not ? !condition.result : condition.result;
                   }
             });
 
+            context.not = false;
       }
       else {
             throw new Error('Unrecognized condition');
@@ -146,13 +145,13 @@ const ResolveCondition = async (c, context, depth = 0, path) => {
             }).length == Object.keys(context.applicable).length;
 
             let overrides = {
-                  id: await field(['id'],context),
-                  name: await field(['name'],context),
-                  location: await field(['location'],context),
-                  type: await field(['type'],context),
-                  kind: await field(['kind'],context),
-                  tags: await field(['tags'],context),
-                  identity: await field(['identity'],context)
+                  id: await field(['id'],context, false, true),
+                  name: await field(['name'],context, false, true),
+                  location: await field(['location'],context, false, true),
+                  type: await field(['type'],context, false, true),
+                  kind: await field(['kind'],context, false, true),
+                  tags: await field(['tags'],context, false, true),
+                  identity: await field(['identity'],context, false, true)
             }
 
             context.fieldOverride = overrides;
@@ -184,6 +183,7 @@ const IfNotExists = async (context) => {
       let scope = getPropertyFromObject(context,'policyRule.then.details.existenceScope') ? getPropertyFromObject(context,'policyRule.then.details.existenceScope') : 'ResourceGroup';
       let isFunctionScanRG = scanRG ? `${scanRG}`[0] == "[" && `${scanRG}`[`${scanRG}`.length - 1] == "]" : false;
       let isFunctionScanName = `${scanName}`[0] == "[" && `${scanName}`[`${scanName}`.length - 1] == "]";
+      let isFunctionScanType = `${scanType}`[0] == "[" && `${scanType}`[`${scanType}`.length - 1] == "]";
       if (isFunctionScanName) {
             scanName = (await ResolveFunctions(
                   ParseFunction(`${scanName}`.substring(1, `${scanName}`.length - 1)),
@@ -196,11 +196,18 @@ const IfNotExists = async (context) => {
                   context
             )).value;
       }
+      if (isFunctionScanType) {
+            scanType = (await ResolveFunctions(
+                  ParseFunction(`${scanType}`.substring(1, `${scanType}`.length - 1)),
+                  context
+            )).value;
+      }
 
       let resourceScanId = null;
 
       if (`${scope}`.toLowerCase() == 'resourcegroup') {
-            resourceScanId = `${scanType}`.toLowerCase() == `${getPropertyFromObject(context,'resource.type')}`.toLowerCase()  ?
+            resourceScanId = `${scanType}`.toLowerCase() == `${getPropertyFromObject(context,'resource.type')}`.toLowerCase() || 
+                             (`${getPropertyFromObject(context,'resource.type')}`.toLowerCase().startsWith(`${scanType}`.toLowerCase()) && `${getPropertyFromObject(context,'resource.type')}`.toLowerCase() != `${scanType}`.toLowerCase()) ?
                   `${resourceId.split('/providers/')[0]}/providers/` + `${scanName ? `${buildResourceNameType(scanType, scanName)}` : scanType}` :
                   `${scanType}`.toLowerCase().startsWith(getPropertyFromObject(context,'resource.type').toLowerCase()) ?
                         `${resourceId}/${scanType.split('/').pop()}` + `${scanName ? `/${scanName.split('/').pop()}` : ''}` :
@@ -219,7 +226,14 @@ const IfNotExists = async (context) => {
             resourceScanId = `${segments.join('/')}/providers/${scanType}` + `${scanName ? `/${scanName}` : ''}`;
       }
 
-      let existentResources = await getResourceById(resourceScanId);
+      let existentResources = null;
+      try{
+            existentResources = await getResourceById(resourceScanId);
+      }
+      catch(err){
+            if(`${err.message}`.startsWith('Resource cannot be read (403):'))
+                  throw new Error(err.message);
+      }
       
       if(!existentResources || !existentResources.resource){
             existentResources = [];
@@ -339,7 +353,6 @@ const count = async (c, context, depth = 0) => {
       let results = [];
 
       if (valueKey == "field") {
-
             let path = await field([c["field"]], context, true);
             let loadPath = replaceAsterisksWithNumbers(path, context.countDepthMap)
             let array = getPropertyFromObject(context.resource, loadPath.split('.'));
@@ -485,7 +498,8 @@ const not = async (c, context, depth = 0) => {
             rawCondition: c,
             result: null
       }
-
+      
+      context.not = true;
       let resolve = await ResolveCondition(c['not'], context, depth + 1);
       condition.rawResult = resolve;
       condition.result = !resolve.result
@@ -516,7 +530,7 @@ const exists = (args) => {
             return arg1 ? arg0.length > 0 : arg0.length == 0;
       }
       else {
-            return arg1 ? Boolean(arg0) : !arg0;
+            return arg1 ? typeof arg0 != "undefined" && arg0 != null : typeof arg0 == "undefined" || arg0 == null ;
       }
 }
 
@@ -650,10 +664,16 @@ const equals = (args) => {
       arg1 = typeof arg1 != "undefined" ? arg1 : '';
 
       if (Array.isArray(arg0)) {
-            return arg0.length == 0 ? false : arg0.every((a0) => String(a0).toLowerCase() == String(arg1).toLowerCase());
+            return arg0.length == 0 ? false : arg0.every((a0) => 
+                                    String(a0).toLowerCase() == String(arg1).toLowerCase() || 
+                                    (String(a0).toLowerCase() == "microsoft.resources/resourcegroups" && String(arg1).toLowerCase() == "microsoft.resources/subscriptions/resourcegroups") || 
+                                    (String(a0).toLowerCase() == "microsoft.resources/subscriptions/resourcegroups" && String(arg1).toLowerCase() == "microsoft.resources/resourcegroups")
+                                    );
       }
       else {
-            return String(arg0).toLowerCase() == String(arg1).toLowerCase();
+            return String(arg0).toLowerCase() == String(arg1).toLowerCase()  || 
+            (String(arg0).toLowerCase() == "microsoft.resources/resourcegroups" && String(arg1).toLowerCase() == "microsoft.resources/subscriptions/resourcegroups") || 
+            (String(arg0).toLowerCase() == "microsoft.resources/subscriptions/resourcegroups" && String(arg1).toLowerCase() == "microsoft.resources/resourcegroups");
       }
 }
 
@@ -835,7 +855,25 @@ const patternMatch = (str, pattern) => {
 };
 
 const notin = (args) => {
-      return !infunction(args);
+      if (Array.isArray(args)) {
+            if (args.length != 2) {
+                  throw new Error(`Expected 2 arguments on function 'in', got ${args.length}`);
+            }
+      }
+      else {
+            throw new Error(`Call this function using 'Array' type arguments`);
+      }
+
+      let [arg0, arg1] = args;
+
+      if((Array.isArray(arg0) && arg0.length == 0) || 
+          arg0 == null || typeof arg0 == "undefined"){
+            return true;
+      }
+      else{
+            return !infunction(args);
+      }
+
 }
 
 

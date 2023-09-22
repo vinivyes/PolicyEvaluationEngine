@@ -1078,8 +1078,8 @@ const parameters = (args, context) => {
       let availableParameters = Object.keys(context.parameters);
       let selectedParameter = availableParameters.find((p) => p.toLocaleLowerCase() == `${args[0]}`.toLocaleLowerCase());
 
-      if (!context.parameters[selectedParameter])
-            throw new Error(`Context has parameters has no value for '${args[0]}' to resolve 'parameters' function.`);
+      if (!selectedParameter)
+            throw new Error(`Context parameters has no value for '${args[0]}' to resolve 'parameters' function.`);
 
 
       return context.parameters[selectedParameter];
@@ -1089,7 +1089,7 @@ const inMemory = {
       aliases: null
 }
 
-const field = async (args, context, pathOnly = false) => {
+const field = async (args, context, pathOnly = false, ignoreApplicability = false) => {
       if (!Array.isArray(args)) {
             throw new Error(`Call this function using 'Array' type arguments`);
       }
@@ -1115,12 +1115,25 @@ const field = async (args, context, pathOnly = false) => {
                   fs.writeFileSync('./aliases.json', JSON.stringify(aliases), { encoding: 'utf-8' });
             }
       }
+      
       let path = null;
+      let paths = [];
+
       for (let alias of inMemory.aliases) {
-            if (alias.name.toLowerCase() === args[0].toLowerCase()) {
-                  //console.log(alias)
+            if (alias.name.toLowerCase() === args[0].toLowerCase()){
+                if(context.resource && alias.resourceType ? `${context.resource.type}`.toLowerCase().startsWith(`${alias.resourceType}`.toLowerCase()) || getResourceType(`${context.resource.id}`.toLowerCase()).startsWith(`${alias.resourceType}`.toLowerCase()) : true)
                   path = `${alias.defaultPath}`
+
+                 paths.push({path:path, type:alias.resourceType})
             }
+      }
+
+      if(path == null && paths.length > 0){
+            return undefined;
+      }
+
+      if(paths.length > 1){
+            path = paths.find((p) => { return context.resource ? `${context.resource.type}`.toLowerCase().startsWith(`${p.type}`.toLowerCase()) : false}).path;
       }
 
       if (!path && !`${args[0]}`.toLowerCase().startsWith('tags['))
@@ -1130,14 +1143,15 @@ const field = async (args, context, pathOnly = false) => {
             return getPropertyFromObject(context.resource, ['tags',tagName]);
       }
 
-      Object.keys(context.applicable).forEach((applicableField) => {
-            if(args[0].toLowerCase() == applicableField){
-                  context.applicability[applicableField] = true;
-                  if(context.applicable[applicableField] != true){
-                        context.applicable[applicableField] = context.currentConditionHash;
+      if(!ignoreApplicability)
+            Object.keys(context.applicable).forEach((applicableField) => {
+                  if(args[0].toLowerCase() == applicableField){
+                        context.applicability[applicableField] = true;
+                        if(context.applicable[applicableField] != true){
+                              context.applicable[applicableField] = context.currentConditionHash;
+                        }
                   }
-            }
-      });
+            });
 
       if (pathOnly)
             return path;
@@ -1188,8 +1202,35 @@ const field = async (args, context, pathOnly = false) => {
                   return extractFullName(context.resource.id);
             }
 
+            if(args[0].toLowerCase() == 'location'){
+                  let location = getPropertyFromObject(context.resource, propertyPaths);
+                  return `${location.split(' ').join('')}`.toLocaleLowerCase();
+            }
+
             return getPropertyFromObject(context.resource, propertyPaths);
       }
+}
+
+function getResourceType (id) {
+      let result = "";
+
+      if(`${id}`.includes('/providers/')){
+            result = `${id}`.split('/providers/');
+            result = result[result.length-1];
+
+            let segments = result.split(`/`);
+            let resourceType = [];
+            resourceType.push(segments[0]);
+
+            for(let s = 1; s < segments.length; s++){
+                  resourceType.push(segments[s]);
+                  s++;
+            }
+
+            result = resourceType.join('/');
+      }
+
+      return result;
 }
 
 function extractFullName(resourceId) {
@@ -1336,4 +1377,4 @@ const availableFunctions = () => {
       return available;
 }
 
-module.exports = { ResolveFunctions, IsFunction, availableFunctions, field, endswith }
+module.exports = { ResolveFunctions, IsFunction, availableFunctions, field, endswith, getResourceType }
